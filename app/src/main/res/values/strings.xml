@@ -1,0 +1,3 @@
+<resources>
+    <string name="accessibility_service_description">Ghost Machine needs Accessibility permission to test automated taps.</string>
+</resources>
