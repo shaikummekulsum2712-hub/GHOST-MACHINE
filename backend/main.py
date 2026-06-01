@@ -42,7 +42,7 @@ async def analyse_screen(command: str = Form(...), screenshot: UploadFile = File
 
     # create timestamp-based file filename
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    screenshot_filename = f"screenshot_{timestamp}.png
+    screenshot_filename = f"screenshot_{timestamp}.png"
     screenshot_path = UPLOAD_DIR / screenshot_filename
 
 
