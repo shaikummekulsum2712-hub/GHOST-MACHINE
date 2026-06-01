@@ -1,0 +1,64 @@
+{
+    "summary": "I will perform the calculation 120 + 100 again in the Calculator app, first clearing any previous input.",
+    "steps": [
+        {
+            "action": "tap",
+            "x": 200,
+            "y": 1150,
+            "reason": "Tap C/AC button to clear previous calculation"
+        },
+        {
+            "action": "wait",
+            "duration": 500,
+            "reason": "Wait for clear action"
+        },
+        {
+            "action": "tap",
+            "x": 200,
+            "y": 1900,
+            "reason": "Tap digit 1"
+        },
+        {
+            "action": "tap",
+            "x": 440,
+            "y": 1900,
+            "reason": "Tap digit 2"
+        },
+        {
+            "action": "tap",
+            "x": 680,
+            "y": 2150,
+            "reason": "Tap digit 0"
+        },
+        {
+            "action": "tap",
+            "x": 940,
+            "y": 1900,
+            "reason": "Tap + operator"
+        },
+        {
+            "action": "tap",
+            "x": 200,
+            "y": 1900,
+            "reason": "Tap digit 1"
+        },
+        {
+            "action": "tap",
+            "x": 680,
+            "y": 2150,
+            "reason": "Tap digit 0"
+        },
+        {
+            "action": "tap",
+            "x": 680,
+            "y": 2150,
+            "reason": "Tap digit 0"
+        },
+        {
+            "action": "tap",
+            "x": 1050,
+            "y": 2150,
+            "reason": "Tap = to calculate the result"
+        }
+    ]
+}

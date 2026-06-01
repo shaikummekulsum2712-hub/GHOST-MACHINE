@@ -135,27 +135,59 @@ class GhostAccessibilityService : AccessibilityService() {
     }
 
     private fun performType(text: String): Boolean {
-        val focusedNode = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        if (focusedNode == null) {
-            Log.e("GhostService", "No focused input field found to type")
+        // Try 1: Use focused input node
+        var targetNode = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+
+        // Try 2: Search the entire node tree for an editable text field
+        if (targetNode == null) {
+            Log.w("GhostService", "No focused input — searching node tree for editable field")
+            targetNode = findEditableNode(rootInActiveWindow)
+        }
+
+        if (targetNode == null) {
+            Log.e("GhostService", "No editable input field found anywhere on screen")
             return false
         }
+
+        // Focus the node first
+        targetNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
 
         val arguments = Bundle()
         arguments.putCharSequence(
             AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
             text
         )
-        val success = focusedNode.performAction(
+        val success = targetNode.performAction(
             AccessibilityNodeInfo.ACTION_SET_TEXT,
             arguments
         )
-        focusedNode.recycle()
+        targetNode.recycle()
         if (success) {
             Log.i("GhostService", "Typed text successfully: $text")
         } else {
             Log.e("GhostService", "Failed to perform SET_TEXT action")
         }
         return success
+    }
+
+    /**
+     * Recursively search the accessibility node tree for an editable text field.
+     */
+    private fun findEditableNode(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (root == null) return null
+
+        if (root.isEditable) {
+            return root
+        }
+
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i) ?: continue
+            val result = findEditableNode(child)
+            if (result != null) return result
+            child.recycle()
+        }
+
+        return null
     }
 }
