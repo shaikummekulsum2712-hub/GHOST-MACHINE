@@ -11,9 +11,11 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -32,22 +34,22 @@ class MainActivity : ComponentActivity() {
                         val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                         startActivity(intent)
                     },
-                    onTestTap = {
+                    onExecuteAction = { actionJson ->
                         Toast.makeText(
                             this,
-                            "Tap will happen in 5 seconds. Open Calculator now.",
+                            "Action will execute in 5 seconds. Switch to Calculator now.",
                             Toast.LENGTH_LONG
                         ).show()
 
                         Handler(Looper.getMainLooper()).postDelayed({
-                            val success = GhostAccessibilityService.tap(500f, 800f)
+                            val success = GhostAccessibilityService.executeAction(actionJson)
 
                             if (success) {
-                                Toast.makeText(this, "Tap command sent", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this, "Action executed successfully", Toast.LENGTH_SHORT).show()
                             } else {
                                 Toast.makeText(
                                     this,
-                                    "Enable Accessibility Service first",
+                                    "Execution failed. Enable Accessibility Service first.",
                                     Toast.LENGTH_LONG
                                 ).show()
                             }
@@ -62,9 +64,10 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun GhostMachineScreen(
     onOpenAccessibility: () -> Unit,
-    onTestTap: () -> Unit
+    onExecuteAction: (String) -> Unit
 ) {
-    var status by remember { mutableStateOf("Phase 1: Fixed tap test") }
+    var status by remember { mutableStateOf("Phase 2: Dynamic JSON actions") }
+    var jsonText by remember { mutableStateOf("{\n  \"action\": \"tap\",\n  \"x\": 470,\n  \"y\": 2100\n}") }
 
     Column(
         modifier = Modifier
@@ -83,23 +86,36 @@ fun GhostMachineScreen(
             modifier = Modifier.padding(top = 12.dp, bottom = 24.dp)
         )
 
+        OutlinedTextField(
+            value = jsonText,
+            onValueChange = { jsonText = it },
+            label = { Text("Action JSON") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 24.dp),
+            maxLines = 6
+        )
+
         Button(
             onClick = {
                 status = "Open settings and enable Ghost Machine service"
                 onOpenAccessibility()
-            }
+            },
+            modifier = Modifier.fillMaxWidth()
         ) {
             Text("Open Accessibility Settings")
         }
 
         Button(
-            modifier = Modifier.padding(top = 16.dp),
+            modifier = Modifier
+                .padding(top = 16.dp)
+                .fillMaxWidth(),
             onClick = {
-                status = "Tap will happen in 5 seconds"
-                onTestTap()
+                status = "Executing action in 5 seconds..."
+                onExecuteAction(jsonText)
             }
         ) {
-            Text("Test Tap")
+            Text("Execute Action")
         }
     }
 }

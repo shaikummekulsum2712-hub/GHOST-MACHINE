@@ -5,6 +5,7 @@ plugins {
 
 android {
     namespace = "com.example.ghostmachine"
+    buildToolsVersion = "36.1.0"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
