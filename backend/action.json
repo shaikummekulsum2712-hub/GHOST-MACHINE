@@ -1,5 +1,5 @@
 {
-    "summary": "Going to the home screen, opening the app drawer, launching the Calculator app, and then tapping the '5' button.",
+    "summary": "Navigate to the home screen, open the app drawer, launch the Calculator app, and then tap the number 5.",
     "steps": [
         {
             "action": "swipe",
@@ -8,12 +8,12 @@
             "endX": 630,
             "endY": 2400,
             "duration": 200,
-            "reason": "Go to home screen"
+            "reason": "Go to the home screen from the current application."
         },
         {
             "action": "wait",
             "duration": 1000,
-            "reason": "Wait for home screen to load"
+            "reason": "Wait for the home screen to load."
         },
         {
             "action": "swipe",
@@ -22,29 +22,29 @@
             "endX": 630,
             "endY": 800,
             "duration": 300,
-            "reason": "Open app drawer"
+            "reason": "Open the app drawer to find the Calculator app."
         },
         {
             "action": "wait",
-            "duration": 1000,
-            "reason": "Wait for app drawer to open"
+            "duration": 1500,
+            "reason": "Wait for the app drawer to open."
         },
         {
             "action": "tap",
-            "x": 313,
-            "y": 1416,
-            "reason": "Tap Calculator app icon"
+            "x": 376,
+            "y": 1493,
+            "reason": "Tap the Calculator app icon."
         },
         {
             "action": "wait",
-            "duration": 3000,
-            "reason": "Wait for Calculator app to open and load"
+            "duration": 2500,
+            "reason": "Wait for the Calculator app to load."
         },
         {
             "action": "tap",
             "x": 315,
-            "y": 1782,
-            "reason": "Tap the number 5 on the calculator"
+            "y": 2038,
+            "reason": "Tap the '5' button in the Calculator app."
         }
     ]
 }
