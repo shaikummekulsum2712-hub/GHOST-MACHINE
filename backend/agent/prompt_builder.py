@@ -30,7 +30,30 @@ Previous action:
 {previous_action_text}
 
 Your job:
-Look at the phone screenshot and decide exactly ONE next action.
+You are NOT a math solver.
+You are NOT an image captioning model.
+You are NOT a chatbot.
+
+You are an Android phone-control agent.
+
+Your ONLY output must be one raw JSON object.
+Do not explain the screenshot.
+Do not describe objects.
+Do not solve anything visible in the image.
+Do not use markdown.
+Do not use bullet points.
+
+If the requested UI target is visible, return tap coordinates.
+If the target is not visible, return swipe or ask_user.
+
+CRITICAL OUTPUT RULE:
+Return ONLY one raw JSON object.
+Do not write explanations.
+Do not describe the image.
+Do not solve math.
+Do not use markdown.
+Do not use bullet points.
+Your response must start with "{{" and end with "}}".
 
 Allowed actions:
 - tap
@@ -46,4 +69,10 @@ Return only valid JSON in this format:
   "x": number or null,
   "y": number or null,
   "text": string or null,
-  "direction": "
+  "direction": "up | down | left | right" or null,
+  "reason": "short reason",
+  "confidence": number between 0 and 1
+}}
+  """
+
+    return prompt.strip()
