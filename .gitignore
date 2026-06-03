@@ -5,3 +5,9 @@ backend/uploads/*.jpg
 backend/uploads/*.jpeg
 backend/uploads/*.webp
 !backend/uploads/.gitkeep
+
+
+
+.gradle/
+.idea/caches/
+local.properties
