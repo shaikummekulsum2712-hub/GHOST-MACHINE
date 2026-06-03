@@ -7,13 +7,13 @@
             "startY": 2780,
             "endX": 630,
             "endY": 2400,
-            "duration": 200,
-            "reason": "Go to the home screen from the current application."
+            "duration": 300,
+            "reason": "Go to home screen from navigation bar."
         },
         {
             "action": "wait",
             "duration": 1000,
-            "reason": "Wait for the home screen to load."
+            "reason": "Wait for home screen to load."
         },
         {
             "action": "swipe",
@@ -22,29 +22,29 @@
             "endX": 630,
             "endY": 800,
             "duration": 300,
-            "reason": "Open the app drawer to find the Calculator app."
+            "reason": "Open app drawer."
         },
         {
             "action": "wait",
             "duration": 1500,
-            "reason": "Wait for the app drawer to open."
-        },
-        {
-            "action": "tap",
-            "x": 376,
-            "y": 1493,
-            "reason": "Tap the Calculator app icon."
-        },
-        {
-            "action": "wait",
-            "duration": 2500,
-            "reason": "Wait for the Calculator app to load."
+            "reason": "Wait for app drawer to open and load."
         },
         {
             "action": "tap",
             "x": 315,
-            "y": 2038,
-            "reason": "Tap the '5' button in the Calculator app."
+            "y": 1420,
+            "reason": "Tap on the Calculator app icon."
+        },
+        {
+            "action": "wait",
+            "duration": 3000,
+            "reason": "Wait for the Calculator app to fully open and load."
+        },
+        {
+            "action": "tap",
+            "x": 315,
+            "y": 2185,
+            "reason": "Tap the number 5 button on the calculator."
         }
     ]
 }
