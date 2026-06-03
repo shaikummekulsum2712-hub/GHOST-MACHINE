@@ -292,8 +292,18 @@ Analyze it carefully and decide the SINGLE NEXT ACTION to take toward the goal.
 If the goal is already achieved (you can see the expected result on screen), return {"action": "done", "reason": "..."}.
 Return ONLY a single JSON object — one action."""
     return prompt
+=======
+from fastapi import FastAPI, UploadFile, File, Form
+from datetime import datetime
+from pathlib import Path
+
+from agent.agent_loop import get_next_action as agent_get_next_action
+from agent.action_schema import CommandRequest, ActionResponse
+
+>>>>>>> origin/main
 
 
+<<<<<<< HEAD
 class CommandRequest(BaseModel):
     command: str
     sender: str = "web"  # "web" or "android"
