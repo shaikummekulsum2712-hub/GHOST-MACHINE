@@ -114,6 +114,57 @@ HTML_CONTENT = """<!DOCTYPE html>
             box-shadow: 0 0 10px var(--status-error);
         }
 
+        /* Vision Loop Indicator */
+        .vision-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            font-size: 12px;
+            font-weight: 700;
+            color: #ef4444;
+            letter-spacing: 0.5px;
+            box-shadow: 0 0 15px rgba(239, 68, 68, 0.1);
+        }
+
+        .vision-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #ef4444;
+            box-shadow: 0 0 10px #ef4444;
+            animation: pulse-red 1.5s infinite;
+        }
+
+        .abort-btn {
+            background: #ef4444;
+            border: none;
+            padding: 4px 10px;
+            border-radius: 6px;
+            color: white;
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-left: 6px;
+            box-shadow: 0 2px 5px rgba(239, 68, 68, 0.3);
+        }
+
+        .abort-btn:hover {
+            background: #dc2626;
+            transform: scale(1.05);
+            box-shadow: 0 2px 8px rgba(239, 68, 68, 0.5);
+        }
+
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+            70% { box-shadow: 0 0 0 8px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+
         /* ── Main Layout ── */
         .main-container {
             flex: 1;
@@ -397,6 +448,46 @@ HTML_CONTENT = """<!DOCTYPE html>
             box-shadow: 0 0 0 3px var(--color-accent-glow), inset 0 2px 4px rgba(0,0,0,0.1);
         }
 
+        .input-wrapper-container {
+            max-width: 900px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .mode-toggle-container {
+            display: flex;
+            padding-left: 20px;
+            align-items: center;
+        }
+
+        .mode-toggle-label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--color-text-muted);
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .mode-toggle-label input {
+            accent-color: var(--color-accent);
+            cursor: pointer;
+            width: 15px;
+            height: 15px;
+        }
+
+        .toggle-text {
+            transition: color 0.2s ease;
+        }
+
+        .mode-toggle-label input:checked ~ .toggle-text {
+            color: var(--color-text-main);
+        }
+
         .send-btn {
             position: absolute;
             right: 8px;
@@ -629,9 +720,16 @@ HTML_CONTENT = """<!DOCTYPE html>
             <span class="logo-icon">👻</span>
             <span class="logo-text">GHOST MACHINE</span>
         </div>
-        <div class="device-status-badge">
-            <div id="device-status-dot" class="status-dot"></div>
-            <span id="device-status-text">Checking Telemetry...</span>
+        <div style="display: flex; align-items: center; gap: 15px;">
+            <div id="vision-loop-indicator" class="vision-indicator" style="display: none;">
+                <span class="vision-dot"></span>
+                <span>VISION LOOP ACTIVE</span>
+                <button class="abort-btn" onclick="abortActiveVisionLoop()">Abort</button>
+            </div>
+            <div class="device-status-badge">
+                <div id="device-status-dot" class="status-dot"></div>
+                <span id="device-status-text">Checking Telemetry...</span>
+            </div>
         </div>
     </header>
 
@@ -650,11 +748,19 @@ HTML_CONTENT = """<!DOCTYPE html>
             
             <!-- Input Area -->
             <div class="input-section">
-                <form id="command-form" class="input-wrapper" onsubmit="submitCommand(event)">
-                    <input id="prompt-input" type="text" autocomplete="off" placeholder="Tell Ghost Machine what to do..." class="prompt-input" required>
-                    <button type="submit" class="send-btn">
-                        <svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
-                    </button>
+                <form id="command-form" class="input-wrapper-container" onsubmit="submitCommand(event)">
+                    <div class="input-wrapper">
+                        <input id="prompt-input" type="text" autocomplete="off" placeholder="Tell Ghost Machine what to do..." class="prompt-input" required>
+                        <button type="submit" class="send-btn">
+                            <svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+                        </button>
+                    </div>
+                    <div class="mode-toggle-container">
+                        <label class="mode-toggle-label">
+                            <input type="checkbox" id="mode-vision-loop" checked>
+                            <span class="toggle-text">👁️ Enable Vision Loop (Closed-loop step-by-step with live AI eyes)</span>
+                        </label>
+                    </div>
                 </form>
             </div>
         </div>
@@ -667,16 +773,19 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <div class="panel-section-title">Visual Layout Preview</div>
                 <div class="phone-mockup-wrapper">
                     <div class="phone-mockup-screen">
+                        <!-- Screenshot image -->
+                        <img id="phone-screenshot" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: fill; z-index: 1; display: none;" alt="Phone screen" />
+                        
                         <!-- Simulated status bar and elements -->
-                        <div class="sim-status-bar">
+                        <div class="sim-status-bar" style="z-index: 5;">
                             <span>00:42</span>
                             <span>📶 🔋 100%</span>
                         </div>
                         
                         <!-- Interactive coordinates canvas -->
-                        <canvas id="phone-canvas" class="phone-canvas" width="234" height="539"></canvas>
+                        <canvas id="phone-canvas" class="phone-canvas" width="234" height="539" style="z-index: 10;"></canvas>
                         
-                        <div class="sim-nav-bar">
+                        <div class="sim-nav-bar" style="z-index: 5;">
                             <div class="sim-nav-pill"></div>
                         </div>
                     </div>
@@ -741,6 +850,27 @@ HTML_CONTENT = """<!DOCTYPE html>
             return (y / DEV_HEIGHT) * canvas.height;
         }
 
+        let lastScreenshotTimestamp = 0;
+
+        // Fetch latest screenshot preview
+        async function fetchLatestScreenshot() {
+            try {
+                const response = await fetch('/vision-loop/screenshot-preview');
+                if (!response.ok) return;
+                const data = await response.json();
+                if (data.has_screenshot && data.timestamp > lastScreenshotTimestamp) {
+                    lastScreenshotTimestamp = data.timestamp;
+                    const screenshotImg = document.getElementById('phone-screenshot');
+                    if (screenshotImg) {
+                        screenshotImg.src = `data:image/jpeg;base64,${data.screenshot}`;
+                        screenshotImg.style.display = 'block';
+                    }
+                }
+            } catch (err) {
+                console.error("Error fetching screenshot preview:", err);
+            }
+        }
+
         // Periodically poll backend for status and sync message logs
         async function checkTelemetry() {
             try {
@@ -787,6 +917,21 @@ HTML_CONTENT = """<!DOCTYPE html>
                     // Trigger canvas redraw on step transition
                     if (oldExec.current_step !== executionStatus.current_step || oldExec.status !== executionStatus.status) {
                         drawCanvasOverlay();
+                    }
+                }
+
+                // 4. Update Vision Loop UI & steps dynamically
+                if (data.vision_loop) {
+                    updateVisionLoopUI(data.vision_loop);
+                }
+
+                // 5. Update screenshot if available
+                if (data.vision && data.vision.has_screenshot) {
+                    fetchLatestScreenshot();
+                } else {
+                    const screenshotImg = document.getElementById('phone-screenshot');
+                    if (screenshotImg && !data.vision.has_screenshot) {
+                        screenshotImg.style.display = 'none';
                     }
                 }
 
@@ -946,6 +1091,8 @@ HTML_CONTENT = """<!DOCTYPE html>
             promptInput.value = '';
             emptyState.style.display = 'none';
 
+            const isVisionLoop = document.getElementById('mode-vision-loop').checked;
+
             // 1. Append dummy loading bubble
             const loaderRow = document.createElement('div');
             loaderRow.className = 'message-row ai';
@@ -966,25 +1113,161 @@ HTML_CONTENT = """<!DOCTYPE html>
             chatContainer.scrollTop = chatContainer.scrollHeight;
 
             try {
-                const res = await fetch('/next-action', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command: val, sender: 'web' })
-                });
-                
-                const data = await res.json();
-                
-                // Clear loading bubble
-                const loader = document.getElementById('temp-loader');
-                if (loader) loader.remove();
-
-                // Wait for polling to detect the new message and insert it naturally
-
+                if (isVisionLoop) {
+                    const res = await fetch('/vision-loop/start', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ goal: val, max_steps: 25 })
+                    });
+                    const data = await res.json();
+                    
+                    // Clear loading bubble
+                    const loader = document.getElementById('temp-loader');
+                    if (loader) loader.remove();
+                } else {
+                    const res = await fetch('/next-action', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ command: val, sender: 'web' })
+                    });
+                    const data = await res.json();
+                    
+                    // Clear loading bubble
+                    const loader = document.getElementById('temp-loader');
+                    if (loader) loader.remove();
+                }
             } catch (err) {
                 console.error("Submit error:", err);
                 const loader = document.getElementById('temp-loader');
-                if (loader) loader.innerHTML = '<div class="ai-avatar">👻</div><div style="color:var(--status-error)">Error calling Gemini backend</div>';
+                if (loader) loader.innerHTML = '<div class="ai-avatar">👻</div><div style="color:var(--status-error)">Error starting task</div>';
             }
+        }
+
+        // Abort the running vision loop
+        async function abortActiveVisionLoop() {
+            if (confirm("Are you sure you want to abort the active vision loop?")) {
+                try {
+                    const res = await fetch('/vision-loop/abort', { method: 'POST' });
+                    const data = await res.json();
+                } catch (err) {
+                    console.error("Error aborting loop:", err);
+                }
+            }
+        }
+
+        // Dynamically rebuild steps and status of Vision Loop in chat bubble
+        function updateVisionLoopUI(vl) {
+            if (!vl || !vl.loop_id) return;
+
+            // Update header vision indicator
+            const headerIndicator = document.getElementById('vision-loop-indicator');
+            if (headerIndicator) {
+                headerIndicator.style.display = vl.active ? 'flex' : 'none';
+            }
+
+            // Find or create chat bubble for loop_id
+            const row = document.getElementById(`msg-${vl.loop_id}`);
+            if (!row) return;
+
+            const bubble = row.querySelector('.chat-bubble');
+            if (!bubble) return;
+
+            // Find or create the steps list element
+            let list = document.getElementById(`steps-list-${vl.loop_id}`);
+            if (!list) {
+                list = document.createElement('div');
+                list.className = 'chat-steps-list';
+                list.id = `steps-list-${vl.loop_id}`;
+                
+                // Insert it before status chip / timestamp
+                const chip = document.getElementById(`chip-${vl.loop_id}`);
+                if (chip) {
+                    bubble.insertBefore(list, chip);
+                } else {
+                    bubble.appendChild(list);
+                }
+            }
+
+            // Find or create status chip if it doesn't exist
+            let chip = document.getElementById(`chip-${vl.loop_id}`);
+            if (!chip) {
+                chip = document.createElement('div');
+                chip.id = `chip-${vl.loop_id}`;
+                chip.className = 'status-chip idle';
+                chip.innerText = 'Idle';
+                bubble.appendChild(chip);
+            }
+
+            // Rebuild/update the list items based on vl.step_history
+            list.innerHTML = '';
+            const mappedSteps = [];
+
+            vl.step_history.forEach((entry, idx) => {
+                const step = entry.action;
+                const stepNum = entry.step;
+                mappedSteps.push(step);
+
+                const item = document.createElement('div');
+                
+                // Check if this step is active or completed
+                const isCurrent = (vl.active && vl.status === "WAITING_EXECUTION" && stepNum === vl.current_step);
+                const isDone = stepNum < vl.current_step || !vl.active;
+
+                if (isCurrent) {
+                    item.className = "chat-step-item active";
+                } else if (isDone) {
+                    item.className = "chat-step-item completed";
+                } else {
+                    item.className = "chat-step-item";
+                }
+                
+                item.id = `step-${vl.loop_id}-${stepNum}`;
+                item.onclick = () => focusStepCoordinate(step, idx);
+
+                const badge = document.createElement('div');
+                badge.className = 'step-num-badge';
+                badge.innerText = stepNum;
+
+                const det = document.createElement('div');
+                det.className = 'step-details';
+
+                const tag = document.createElement('span');
+                tag.className = 'step-action-tag';
+                tag.innerText = step.action;
+
+                const reason = document.createElement('span');
+                reason.className = 'step-reason';
+                reason.innerText = step.reason || '';
+
+                det.appendChild(tag);
+                det.appendChild(reason);
+                item.appendChild(badge);
+                item.appendChild(det);
+                list.appendChild(item);
+            });
+
+            // Update status chip text and styling
+            chip.className = `status-chip ${vl.status.toLowerCase()}`;
+            if (vl.status === "WAITING_SCREENSHOT") {
+                chip.innerText = "📸 Waiting for phone screenshot...";
+                chip.className = "status-chip queued";
+            } else if (vl.status === "THINKING") {
+                chip.innerText = "🧠 AI is analyzing screen...";
+                chip.className = "status-chip executing";
+            } else if (vl.status === "WAITING_EXECUTION") {
+                chip.innerText = `⚙️ Executing step ${vl.current_step}`;
+                chip.className = "status-chip executing";
+            } else if (vl.status === "DONE") {
+                chip.innerText = "✅ Completed Successfully";
+                chip.className = "status-chip success";
+            } else if (vl.status === "FAILED") {
+                chip.innerText = `❌ Failed: ${vl.error || 'Unknown error'}`;
+                chip.className = "status-chip failed";
+            }
+
+            // Sync activeSteps for canvas drawing
+            activeSteps = mappedSteps;
+            drawCanvasOverlay();
         }
 
         // Focus and draw single step highlighting ring

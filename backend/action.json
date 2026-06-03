@@ -1,64 +1,50 @@
 {
-    "summary": "I will perform the calculation 120 + 100 again in the Calculator app, first clearing any previous input.",
+    "summary": "Going to the home screen, opening the app drawer, launching the Calculator app, and then tapping the '5' button.",
     "steps": [
         {
-            "action": "tap",
-            "x": 200,
-            "y": 1150,
-            "reason": "Tap C/AC button to clear previous calculation"
+            "action": "swipe",
+            "startX": 630,
+            "startY": 2780,
+            "endX": 630,
+            "endY": 2400,
+            "duration": 200,
+            "reason": "Go to home screen"
         },
         {
             "action": "wait",
-            "duration": 500,
-            "reason": "Wait for clear action"
+            "duration": 1000,
+            "reason": "Wait for home screen to load"
+        },
+        {
+            "action": "swipe",
+            "startX": 630,
+            "startY": 2600,
+            "endX": 630,
+            "endY": 800,
+            "duration": 300,
+            "reason": "Open app drawer"
+        },
+        {
+            "action": "wait",
+            "duration": 1000,
+            "reason": "Wait for app drawer to open"
         },
         {
             "action": "tap",
-            "x": 200,
-            "y": 1900,
-            "reason": "Tap digit 1"
+            "x": 313,
+            "y": 1416,
+            "reason": "Tap Calculator app icon"
+        },
+        {
+            "action": "wait",
+            "duration": 3000,
+            "reason": "Wait for Calculator app to open and load"
         },
         {
             "action": "tap",
-            "x": 440,
-            "y": 1900,
-            "reason": "Tap digit 2"
-        },
-        {
-            "action": "tap",
-            "x": 680,
-            "y": 2150,
-            "reason": "Tap digit 0"
-        },
-        {
-            "action": "tap",
-            "x": 940,
-            "y": 1900,
-            "reason": "Tap + operator"
-        },
-        {
-            "action": "tap",
-            "x": 200,
-            "y": 1900,
-            "reason": "Tap digit 1"
-        },
-        {
-            "action": "tap",
-            "x": 680,
-            "y": 2150,
-            "reason": "Tap digit 0"
-        },
-        {
-            "action": "tap",
-            "x": 680,
-            "y": 2150,
-            "reason": "Tap digit 0"
-        },
-        {
-            "action": "tap",
-            "x": 1050,
-            "y": 2150,
-            "reason": "Tap = to calculate the result"
+            "x": 315,
+            "y": 1782,
+            "reason": "Tap the number 5 on the calculator"
         }
     ]
 }

@@ -79,5 +79,80 @@ class TestGhostBackend(unittest.TestCase):
         except urllib.error.URLError as e:
             self.fail(f"Failed to connect to server: {e}")
 
+    def test_vision_loop_lifecycle(self):
+        # 1. Start Vision Loop
+        start_payload = json.dumps({"goal": "Test Vision Loop Integration", "max_steps": 10}).encode("utf-8")
+        start_req = urllib.request.Request(
+            f"{self.BASE_URL}/vision-loop/start",
+            data=start_payload,
+            headers={"Content-Type": "application/json"}
+        )
+
+        try:
+            with urllib.request.urlopen(start_req) as response:
+                self.assertEqual(response.status, 200)
+                data = json.loads(response.read().decode())
+                self.assertIn("loop_id", data)
+                self.assertEqual(data["status"], "WAITING_SCREENSHOT")
+                loop_id = data["loop_id"]
+        except urllib.error.URLError as e:
+            self.fail(f"Failed to start vision loop: {e}")
+
+        # 2. Check status is active
+        status_req = urllib.request.Request(f"{self.BASE_URL}/vision-loop/status")
+        try:
+            with urllib.request.urlopen(status_req) as response:
+                self.assertEqual(response.status, 200)
+                status_data = json.loads(response.read().decode())
+                self.assertTrue(status_data["active"])
+                self.assertEqual(status_data["loop_id"], loop_id)
+                self.assertEqual(status_data["status"], "WAITING_SCREENSHOT")
+                self.assertEqual(status_data["goal"], "Test Vision Loop Integration")
+        except urllib.error.URLError as e:
+            self.fail(f"Failed to get vision loop status: {e}")
+
+        # 3. Report action complete
+        action_complete_payload = json.dumps({
+            "loop_id": loop_id,
+            "step_index": 1,
+            "success": True
+        }).encode("utf-8")
+        action_req = urllib.request.Request(
+            f"{self.BASE_URL}/vision-loop/action-complete",
+            data=action_complete_payload,
+            headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(action_req) as response:
+                self.assertEqual(response.status, 200)
+                action_data = json.loads(response.read().decode())
+                self.assertEqual(action_data["status"], "WAITING_SCREENSHOT")
+        except urllib.error.URLError as e:
+            self.fail(f"Failed to report action complete: {e}")
+
+        # 4. Abort loop
+        abort_req = urllib.request.Request(
+            f"{self.BASE_URL}/vision-loop/abort",
+            data=b"{}",
+            headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(abort_req) as response:
+                self.assertEqual(response.status, 200)
+                abort_data = json.loads(response.read().decode())
+                self.assertEqual(abort_data["status"], "aborted")
+        except urllib.error.URLError as e:
+            self.fail(f"Failed to abort vision loop: {e}")
+
+        # 5. Check status is idle
+        try:
+            with urllib.request.urlopen(status_req) as response:
+                self.assertEqual(response.status, 200)
+                status_data = json.loads(response.read().decode())
+                self.assertFalse(status_data["active"])
+                self.assertEqual(status_data["status"], "IDLE")
+        except urllib.error.URLError as e:
+            self.fail(f"Failed to check post-abort status: {e}")
+
 if __name__ == "__main__":
     unittest.main()
