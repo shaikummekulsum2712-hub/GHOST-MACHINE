@@ -307,7 +307,7 @@ class ScreenshotUpload(BaseModel):
 
 class StatusReport(BaseModel):
     id: str
-    status: str          # "EXECUTING", "SUCCESS", "FAILED"
+    status: str          # "IDLE", "QUEUED", "DISPATCHED", "EXECUTING", "SUCCESS", "FAILED"
     current_step: int
     total_steps: int
     current_action: str = ""
