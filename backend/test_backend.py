@@ -32,7 +32,7 @@ class TestGhostBackend(unittest.TestCase):
     def test_home_endpoint(self):
         try:
             req = urllib.request.Request(f"{self.BASE_URL}/")
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=10) as response:
                 self.assertEqual(response.status, 200)
                 html = response.read().decode()
                 self.assertIn("<!DOCTYPE html>", html)
@@ -57,7 +57,7 @@ class TestGhostBackend(unittest.TestCase):
         )
 
         try:
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=10) as response:
                 self.assertEqual(response.status, 200)
                 data = json.loads(response.read().decode())
                 
@@ -89,7 +89,7 @@ class TestGhostBackend(unittest.TestCase):
         )
 
         try:
-            with urllib.request.urlopen(start_req) as response:
+            with urllib.request.urlopen(start_req, timeout=10) as response:
                 self.assertEqual(response.status, 200)
                 data = json.loads(response.read().decode())
                 self.assertIn("loop_id", data)
@@ -101,7 +101,7 @@ class TestGhostBackend(unittest.TestCase):
         # 2. Check status is active
         status_req = urllib.request.Request(f"{self.BASE_URL}/vision-loop/status")
         try:
-            with urllib.request.urlopen(status_req) as response:
+            with urllib.request.urlopen(status_req, timeout=10) as response:
                 self.assertEqual(response.status, 200)
                 status_data = json.loads(response.read().decode())
                 self.assertTrue(status_data["active"])
@@ -123,7 +123,7 @@ class TestGhostBackend(unittest.TestCase):
             headers={"Content-Type": "application/json"}
         )
         try:
-            with urllib.request.urlopen(action_req) as response:
+            with urllib.request.urlopen(action_req, timeout=10) as response:
                 self.assertEqual(response.status, 200)
                 action_data = json.loads(response.read().decode())
                 self.assertEqual(action_data["status"], "WAITING_SCREENSHOT")
@@ -137,7 +137,7 @@ class TestGhostBackend(unittest.TestCase):
             headers={"Content-Type": "application/json"}
         )
         try:
-            with urllib.request.urlopen(abort_req) as response:
+            with urllib.request.urlopen(abort_req, timeout=10) as response:
                 self.assertEqual(response.status, 200)
                 abort_data = json.loads(response.read().decode())
                 self.assertEqual(abort_data["status"], "aborted")
@@ -146,7 +146,7 @@ class TestGhostBackend(unittest.TestCase):
 
         # 5. Check status is idle
         try:
-            with urllib.request.urlopen(status_req) as response:
+            with urllib.request.urlopen(status_req, timeout=10) as response:
                 self.assertEqual(response.status, 200)
                 status_data = json.loads(response.read().decode())
                 self.assertFalse(status_data["active"])
