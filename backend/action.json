@@ -1,20 +1,6 @@
 {
-    "summary": "Navigate to the home screen, open the app drawer, launch the Calculator app, and then tap the number 5.",
+    "summary": "I will open the app drawer, search for and open WhatsApp, then search for 'kulsum' within WhatsApp and initiate a call to them.",
     "steps": [
-        {
-            "action": "swipe",
-            "startX": 630,
-            "startY": 2780,
-            "endX": 630,
-            "endY": 2400,
-            "duration": 300,
-            "reason": "Go to home screen from navigation bar."
-        },
-        {
-            "action": "wait",
-            "duration": 1000,
-            "reason": "Wait for home screen to load."
-        },
         {
             "action": "swipe",
             "startX": 630,
@@ -22,29 +8,82 @@
             "endX": 630,
             "endY": 800,
             "duration": 300,
-            "reason": "Open app drawer."
+            "reason": "Open the app drawer to find WhatsApp."
+        },
+        {
+            "action": "wait",
+            "duration": 1000,
+            "reason": "Wait for the app drawer to fully open."
+        },
+        {
+            "action": "tap",
+            "x": 630,
+            "y": 182,
+            "reason": "Tap the search bar in the app drawer."
         },
         {
             "action": "wait",
             "duration": 1500,
-            "reason": "Wait for app drawer to open and load."
+            "reason": "Wait for the keyboard to appear before typing."
+        },
+        {
+            "action": "type",
+            "text": "WhatsApp",
+            "reason": "Type 'WhatsApp' into the search bar."
+        },
+        {
+            "action": "wait",
+            "duration": 1000,
+            "reason": "Wait for search results to load."
         },
         {
             "action": "tap",
-            "x": 315,
-            "y": 1420,
-            "reason": "Tap on the Calculator app icon."
+            "x": 630,
+            "y": 372,
+            "reason": "Tap on the WhatsApp app icon from the search results to open it."
         },
         {
             "action": "wait",
             "duration": 3000,
-            "reason": "Wait for the Calculator app to fully open and load."
+            "reason": "Wait for WhatsApp to load completely."
         },
         {
             "action": "tap",
-            "x": 315,
-            "y": 2185,
-            "reason": "Tap the number 5 button on the calculator."
+            "x": 1042,
+            "y": 146,
+            "reason": "Tap the search icon within WhatsApp to find contacts."
+        },
+        {
+            "action": "wait",
+            "duration": 1500,
+            "reason": "Wait for the search input field and keyboard to appear in WhatsApp."
+        },
+        {
+            "action": "type",
+            "text": "kulsum",
+            "reason": "Type 'kulsum' to search for the contact."
+        },
+        {
+            "action": "wait",
+            "duration": 1500,
+            "reason": "Wait for search results to display the contact."
+        },
+        {
+            "action": "tap",
+            "x": 630,
+            "y": 320,
+            "reason": "Tap on the 'kulsum' contact to open their chat."
+        },
+        {
+            "action": "wait",
+            "duration": 1500,
+            "reason": "Wait for the chat screen to load."
+        },
+        {
+            "action": "tap",
+            "x": 907,
+            "y": 146,
+            "reason": "Tap the call icon at the top of the chat screen to initiate a voice call."
         }
     ]
 }
