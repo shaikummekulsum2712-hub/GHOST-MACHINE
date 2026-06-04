@@ -28,5 +28,3 @@ def get_next_action(command: str,screenshot_path: str | None = None) -> ActionRe
     safe_action = apply_safety_filter(action, command)
 
     return safe_action
-
-    return safe_action

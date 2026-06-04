@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Ghost Machine Dashboard</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #0b0f19;
+            color: #f5f5f5;
+        }
+
+        header {
+            padding: 20px;
+            background: #111827;
+            border-bottom: 1px solid #293244;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 26px;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 18px;
+            padding: 20px;
+        }
+
+        .card {
+            background: #111827;
+            border: 1px solid #293244;
+            border-radius: 14px;
+            padding: 18px;
+        }
+
+        .label {
+            color: #9ca3af;
+            font-size: 13px;
+            margin-bottom: 6px;
+        }
+
+        .value {
+            font-size: 18px;
+            margin-bottom: 16px;
+            word-break: break-word;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 8px 12px;
+            background: #1d4ed8;
+            border-radius: 999px;
+            font-weight: bold;
+        }
+
+        img {
+            max-width: 100%;
+            border-radius: 12px;
+            border: 1px solid #293244;
+        }
+
+        pre {
+            background: #020617;
+            padding: 14px;
+            border-radius: 10px;
+            overflow-x: auto;
+            color: #d1d5db;
+        }
+    </style>
+</head>
+<body>
+<header>
+    <h1>👻 Ghost Machine Dashboard</h1>
+    <p>Live backend monitor for screenshot, VLM action, reason, and confidence.</p>
+</header>
+
+<div class="container">
+    <div class="card">
+        <div class="label">Status</div>
+        <div class="value"><span id="status" class="status">loading</span></div>
+
+        <div class="label">Command</div>
+        <div id="command" class="value">-</div>
+
+        <div class="label">Action</div>
+        <div id="action" class="value">-</div>
+
+        <div class="label">Reason</div>
+        <div id="reason" class="value">-</div>
+
+        <div class="label">Confidence</div>
+        <div id="confidence" class="value">-</div>
+
+        <div class="label">Updated At</div>
+        <div id="updated_at" class="value">-</div>
+    </div>
+
+    <div class="card">
+        <div class="label">Latest Screenshot</div>
+        <img id="screenshot" src="" alt="No screenshot yet" />
+    </div>
+
+    <div class="card" style="grid-column: span 2;">
+        <div class="label">Raw Status JSON</div>
+        <pre id="raw_json">{}</pre>
+    </div>
+</div>
+
+<script>
+    async function loadStatus() {
+        try {
+            const res = await fetch("/status");
+            const data = await res.json();
+
+            document.getElementById("status").textContent = data.status || "-";
+            document.getElementById("command").textContent = data.command || "-";
+            document.getElementById("action").textContent = data.action || "-";
+            document.getElementById("reason").textContent = data.reason || "-";
+            document.getElementById("confidence").textContent = data.confidence ?? "-";
+            document.getElementById("updated_at").textContent = data.updated_at || "-";
+            document.getElementById("raw_json").textContent = JSON.stringify(data, null, 2);
+
+            if (data.screenshot_url) {
+                document.getElementById("screenshot").src = data.screenshot_url + "?t=" + Date.now();
+            }
+        } catch (err) {
+            document.getElementById("status").textContent = "dashboard_error";
+            document.getElementById("raw_json").textContent = err.toString();
+        }
+    }
+
+    loadStatus();
+    setInterval(loadStatus, 1000);
+</script>
+</body>
+</html>

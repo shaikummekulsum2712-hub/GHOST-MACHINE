@@ -13,6 +13,11 @@ RISKY_KEYWORDS = [
     "upi",
     "transfer",
     "purchase",
+    "gradlew",
+    "terminal",
+    "powershell",
+    "cmd",
+    "installDebug"
 ]
 
 
