@@ -1,192 +1,292 @@
 package com.example.ghostmachine
 
+import android.Manifest
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import com.example.ghostmachine.ui.theme.GHOSTMACHINETheme
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import org.json.JSONObject
-import java.util.UUID
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
 
-    private val messages = mutableStateListOf<ChatMessage>()
-    private var isTyping by mutableStateOf(false)
+    private var commandText by mutableStateOf("")
+    private var statusText by mutableStateOf("Ready")
+    private var lastJson by mutableStateOf("")
+    private var isLoading by mutableStateOf(false)
+
+    private val speechLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val spokenText = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+
+            if (!spokenText.isNullOrBlank()) {
+                commandText = spokenText
+            }
+        }
+
+    private val audioPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                startVoiceInput()
+            } else {
+                Toast.makeText(this, "Mic permission denied", Toast.LENGTH_SHORT).show()
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         setContent {
-            GHOSTMACHINETheme {
-                ChatScreen(
-                    messages = messages,
-                    isTyping = isTyping,
-                    onSendMessage = { command ->
-                        handleUserCommand(command)
-                    },
-                    onOpenAccessibility = {
-                        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        startActivity(intent)
-                    }
-                )
+            MaterialTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    GhostMachineScreen()
+                }
             }
         }
     }
 
-    private fun handleUserCommand(command: String) {
-        val userMessage = ChatMessage(
-            text = command,
-            isUser = true
-        )
+    @Composable
+    private fun GhostMachineScreen() {
+        val scrollState = rememberScrollState()
 
-        messages.add(userMessage)
-        isTyping = true
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(18.dp)
+                .verticalScroll(scrollState)
+        ) {
+            Text(
+                text = "👻 Ghost Machine",
+                style = MaterialTheme.typography.headlineMedium
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Text(
+                text = "Enter a command or use voice. Backend will analyze current screen and return one action.",
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            OutlinedTextField(
+                value = commandText,
+                onValueChange = { commandText = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Command") },
+                placeholder = { Text("Example: check previous conversation") },
+                minLines = 2
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    modifier = Modifier.weight(1f),
+                    enabled = !isLoading,
+                    onClick = {
+                        if (commandText.isBlank()) {
+                            Toast.makeText(this@MainActivity, "Enter command first", Toast.LENGTH_SHORT).show()
+                        } else {
+                            runGhostCommand(commandText.trim())
+                        }
+                    }
+                ) {
+                    Text(if (isLoading) "Running..." else "Run Ghost")
+                }
+
+                OutlinedButton(
+                    modifier = Modifier.weight(1f),
+                    enabled = !isLoading,
+                    onClick = {
+                        audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                ) {
+                    Text("Voice")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            OutlinedButton(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = {
+                    val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    startActivity(intent)
+                }
+            ) {
+                Text("Open Accessibility Settings")
+            }
+
+            Spacer(modifier = Modifier.height(22.dp))
+
+            Text(
+                text = "Status",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(statusText)
+
+            Spacer(modifier = Modifier.height(22.dp))
+
+            Text(
+                text = "Last Backend JSON",
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(lastJson.ifBlank { "-" })
+        }
+    }
+
+    private fun startVoiceInput() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Tell Ghost what to do")
+        }
+
+        speechLauncher.launch(intent)
+    }
+
+    private fun runGhostCommand(command: String) {
+        isLoading = true
+        statusText = "Checking accessibility service..."
+        lastJson = ""
 
         Thread {
             val serviceEnabled = GhostAccessibilityService.instance != null
 
             if (!serviceEnabled) {
-                Handler(Looper.getMainLooper()).post {
-                    isTyping = false
-                    messages.add(
-                        ChatMessage(
-                            text = "Accessibility service is not enabled. Please enable Ghost Machine in Accessibility settings.",
-                            isUser = false,
-                            status = MessageStatus.FAILED
-                        )
-                    )
-
-                    Toast.makeText(
-                        this,
-                        "Enable Accessibility Service first",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
+                updateUi(
+                    loading = false,
+                    status = "Accessibility service is not enabled. Open settings and enable Ghost Machine.",
+                    json = ""
+                )
                 return@Thread
             }
+
+            updateUi(
+                loading = true,
+                status = "Capturing screenshot...",
+                json = ""
+            )
 
             val screenshotBytes = GhostAccessibilityService.captureScreenJpegBytes()
 
             if (screenshotBytes == null) {
-                Handler(Looper.getMainLooper()).post {
-                    isTyping = false
-                    messages.add(
-                        ChatMessage(
-                            text = "Failed to capture screenshot. Make sure Accessibility permission is enabled and phone is Android 11+.",
-                            isUser = false,
-                            status = MessageStatus.FAILED
-                        )
-                    )
-                }
+                updateUi(
+                    loading = false,
+                    status = "Screenshot capture failed. Need Android 11+ and Accessibility permission.",
+                    json = ""
+                )
                 return@Thread
             }
 
+            updateUi(
+                loading = true,
+                status = "Sending screenshot to backend...",
+                json = ""
+            )
+
             val responseJson = ApiClient.analyzeScreen(command, screenshotBytes)
 
-            Handler(Looper.getMainLooper()).post {
-                isTyping = false
+            if (responseJson == null) {
+                updateUi(
+                    loading = false,
+                    status = "Backend failed. Check backend server and ADB reverse.",
+                    json = ""
+                )
+                return@Thread
+            }
 
-                if (responseJson == null) {
-                    messages.add(
-                        ChatMessage(
-                            text = "Backend connection failed. Check backend server and ADB reverse.",
-                            isUser = false,
-                            status = MessageStatus.FAILED
-                        )
+            updateUi(
+                loading = true,
+                status = "Backend responded. Executing action...",
+                json = responseJson
+            )
+
+            try {
+                val obj = JSONObject(responseJson)
+                val action = obj.optString("action", "unknown")
+                val reason = obj.optString("reason", "No reason")
+                val confidence = obj.optDouble("confidence", 0.0)
+
+                if (action == "ask_user") {
+                    updateUi(
+                        loading = false,
+                        status = "Need user help: $reason",
+                        json = responseJson
                     )
-                    return@post
+                    return@Thread
                 }
 
-                try {
-                    val actionObject = JSONObject(responseJson)
-                    val action = actionObject.optString("action", "unknown")
-                    val reason = actionObject.optString("reason", "No reason given")
-                    val confidence = actionObject.optDouble("confidence", 0.0)
-
-                    val aiMessageId = UUID.randomUUID().toString()
-
-                    val aiMessage = ChatMessage(
-                        id = aiMessageId,
-                        text = buildAiMessageText(action, reason, confidence),
-                        isUser = false,
-                        actionJson = responseJson,
-                        status = MessageStatus.EXECUTING
+                if (action == "done") {
+                    updateUi(
+                        loading = false,
+                        status = "Done: $reason",
+                        json = responseJson
                     )
-
-                    messages.add(aiMessage)
-
-                    if (action == "ask_user") {
-                        updateMessageStatus(aiMessageId, MessageStatus.FAILED)
-                        Toast.makeText(this, reason, Toast.LENGTH_LONG).show()
-                        return@post
-                    }
-
-                    if (action == "done") {
-                        updateMessageStatus(aiMessageId, MessageStatus.SUCCESS)
-                        return@post
-                    }
-
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        Thread {
-                            val success = GhostAccessibilityService.executeAction(responseJson)
-
-                            Handler(Looper.getMainLooper()).post {
-                                updateMessageStatus(
-                                    aiMessageId,
-                                    if (success) MessageStatus.SUCCESS else MessageStatus.FAILED
-                                )
-
-                                if (!success) {
-                                    Toast.makeText(
-                                        this,
-                                        "Action failed: $action",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                }
-                            }
-                        }.start()
-                    }, 1200)
-
-                } catch (e: Exception) {
-                    messages.add(
-                        ChatMessage(
-                            text = "Invalid backend response: ${e.message}",
-                            isUser = false,
-                            actionJson = responseJson,
-                            status = MessageStatus.FAILED
-                        )
-                    )
+                    return@Thread
                 }
+
+                Thread.sleep(1200)
+
+                val success = GhostAccessibilityService.executeAction(responseJson)
+
+                updateUi(
+                    loading = false,
+                    status = if (success) {
+                        "Executed: $action | confidence: $confidence | reason: $reason"
+                    } else {
+                        "Action failed: $action | reason: $reason"
+                    },
+                    json = responseJson
+                )
+
+            } catch (e: Exception) {
+                updateUi(
+                    loading = false,
+                    status = "Invalid backend response: ${e.message}",
+                    json = responseJson
+                )
             }
         }.start()
     }
 
-    private fun buildAiMessageText(
-        action: String,
-        reason: String,
-        confidence: Double
-    ): String {
-        return when (action) {
-            "tap" -> "I will tap the target.\nReason: $reason\nConfidence: $confidence"
-            "swipe" -> "I will swipe on the screen.\nReason: $reason\nConfidence: $confidence"
-            "type" -> "I will type the required text.\nReason: $reason\nConfidence: $confidence"
-            "wait" -> "I will wait for the screen to load.\nReason: $reason\nConfidence: $confidence"
-            "done" -> "Task already done.\nReason: $reason\nConfidence: $confidence"
-            "ask_user" -> "Need your confirmation.\nReason: $reason"
-            else -> "Unknown action: $action\nReason: $reason"
-        }
-    }
-
-    private fun updateMessageStatus(messageId: String, status: MessageStatus) {
-        val index = messages.indexOfFirst { it.id == messageId }
-
-        if (index != -1) {
-            messages[index] = messages[index].copy(status = status)
+    private fun updateUi(
+        loading: Boolean,
+        status: String,
+        json: String
+    ) {
+        Handler(Looper.getMainLooper()).post {
+            isLoading = loading
+            statusText = status
+            lastJson = json
         }
     }
 }

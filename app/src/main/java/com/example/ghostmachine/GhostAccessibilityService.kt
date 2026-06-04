@@ -114,9 +114,7 @@ class GhostAccessibilityService : AccessibilityService() {
         Log.i("GhostService", "Accessibility service destroyed")
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Not needed for now
-    }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
     override fun onInterrupt() {
         Log.i("GhostService", "Accessibility service interrupted")
@@ -196,21 +194,8 @@ class GhostAccessibilityService : AccessibilityService() {
             .addStroke(GestureDescription.StrokeDescription(path, 0, 100))
             .build()
 
-        dispatchGesture(
-            gesture,
-            object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    super.onCompleted(gestureDescription)
-                    Log.i("GhostService", "Tap completed at $x, $y")
-                }
-
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    super.onCancelled(gestureDescription)
-                    Log.w("GhostService", "Tap cancelled")
-                }
-            },
-            null
-        )
+        dispatchGesture(gesture, null, null)
+        Log.i("GhostService", "Tap requested at $x, $y")
     }
 
     private fun performDirectionalSwipe(direction: String) {
@@ -279,24 +264,8 @@ class GhostAccessibilityService : AccessibilityService() {
             .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
             .build()
 
-        dispatchGesture(
-            gesture,
-            object : GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    super.onCompleted(gestureDescription)
-                    Log.i(
-                        "GhostService",
-                        "Swipe completed from ($startX,$startY) to ($endX,$endY)"
-                    )
-                }
-
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    super.onCancelled(gestureDescription)
-                    Log.w("GhostService", "Swipe cancelled")
-                }
-            },
-            null
-        )
+        dispatchGesture(gesture, null, null)
+        Log.i("GhostService", "Swipe requested from ($startX,$startY) to ($endX,$endY)")
     }
 
     private fun performType(text: String): Boolean {
@@ -326,12 +295,6 @@ class GhostAccessibilityService : AccessibilityService() {
         )
 
         targetNode.recycle()
-
-        if (success) {
-            Log.i("GhostService", "Typed text: $text")
-        } else {
-            Log.e("GhostService", "Typing failed")
-        }
 
         return success
     }
