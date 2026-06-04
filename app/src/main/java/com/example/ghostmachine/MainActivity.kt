@@ -8,114 +8,185 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import com.example.ghostmachine.ui.theme.GHOSTMACHINETheme
+import org.json.JSONObject
+import java.util.UUID
 
 class MainActivity : ComponentActivity() {
+
+    private val messages = mutableStateListOf<ChatMessage>()
+    private var isTyping by mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         setContent {
             GHOSTMACHINETheme {
-                GhostMachineScreen(
+                ChatScreen(
+                    messages = messages,
+                    isTyping = isTyping,
+                    onSendMessage = { command ->
+                        handleUserCommand(command)
+                    },
                     onOpenAccessibility = {
                         val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
                         startActivity(intent)
-                    },
-                    onExecuteAction = { actionJson ->
-                        Toast.makeText(
-                            this,
-                            "Action will execute in 5 seconds. Switch to Calculator now.",
-                            Toast.LENGTH_LONG
-                        ).show()
-
-                        Handler(Looper.getMainLooper()).postDelayed({
-                            val success = GhostAccessibilityService.executeAction(actionJson)
-
-                            if (success) {
-                                Toast.makeText(this, "Action executed successfully", Toast.LENGTH_SHORT).show()
-                            } else {
-                                Toast.makeText(
-                                    this,
-                                    "Execution failed. Enable Accessibility Service first.",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            }
-                        }, 5000)
                     }
                 )
             }
         }
     }
-}
 
-@Composable
-fun GhostMachineScreen(
-    onOpenAccessibility: () -> Unit,
-    onExecuteAction: (String) -> Unit
-) {
-    var status by remember { mutableStateOf("Phase 2: Dynamic JSON actions") }
-    var jsonText by remember { mutableStateOf("{\n  \"action\": \"tap\",\n  \"x\": 470,\n  \"y\": 2100\n}") }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = "Ghost Machine",
-            style = MaterialTheme.typography.headlineMedium
+    private fun handleUserCommand(command: String) {
+        val userMessage = ChatMessage(
+            text = command,
+            isUser = true
         )
 
-        Text(
-            text = status,
-            modifier = Modifier.padding(top = 12.dp, bottom = 24.dp)
-        )
+        messages.add(userMessage)
+        isTyping = true
 
-        OutlinedTextField(
-            value = jsonText,
-            onValueChange = { jsonText = it },
-            label = { Text("Action JSON") },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 24.dp),
-            maxLines = 6
-        )
+        Thread {
+            val serviceEnabled = GhostAccessibilityService.instance != null
 
-        Button(
-            onClick = {
-                status = "Open settings and enable Ghost Machine service"
-                onOpenAccessibility()
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Open Accessibility Settings")
-        }
+            if (!serviceEnabled) {
+                Handler(Looper.getMainLooper()).post {
+                    isTyping = false
+                    messages.add(
+                        ChatMessage(
+                            text = "Accessibility service is not enabled. Please enable Ghost Machine in Accessibility settings.",
+                            isUser = false,
+                            status = MessageStatus.FAILED
+                        )
+                    )
 
-        Button(
-            modifier = Modifier
-                .padding(top = 16.dp)
-                .fillMaxWidth(),
-            onClick = {
-                status = "Executing action in 5 seconds..."
-                onExecuteAction(jsonText)
+                    Toast.makeText(
+                        this,
+                        "Enable Accessibility Service first",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                return@Thread
             }
-        ) {
-            Text("Execute Action")
+
+            val screenshotBytes = GhostAccessibilityService.captureScreenJpegBytes()
+
+            if (screenshotBytes == null) {
+                Handler(Looper.getMainLooper()).post {
+                    isTyping = false
+                    messages.add(
+                        ChatMessage(
+                            text = "Failed to capture screenshot. Make sure Accessibility permission is enabled and phone is Android 11+.",
+                            isUser = false,
+                            status = MessageStatus.FAILED
+                        )
+                    )
+                }
+                return@Thread
+            }
+
+            val responseJson = ApiClient.analyzeScreen(command, screenshotBytes)
+
+            Handler(Looper.getMainLooper()).post {
+                isTyping = false
+
+                if (responseJson == null) {
+                    messages.add(
+                        ChatMessage(
+                            text = "Backend connection failed. Check backend server and ADB reverse.",
+                            isUser = false,
+                            status = MessageStatus.FAILED
+                        )
+                    )
+                    return@post
+                }
+
+                try {
+                    val actionObject = JSONObject(responseJson)
+                    val action = actionObject.optString("action", "unknown")
+                    val reason = actionObject.optString("reason", "No reason given")
+                    val confidence = actionObject.optDouble("confidence", 0.0)
+
+                    val aiMessageId = UUID.randomUUID().toString()
+
+                    val aiMessage = ChatMessage(
+                        id = aiMessageId,
+                        text = buildAiMessageText(action, reason, confidence),
+                        isUser = false,
+                        actionJson = responseJson,
+                        status = MessageStatus.EXECUTING
+                    )
+
+                    messages.add(aiMessage)
+
+                    if (action == "ask_user") {
+                        updateMessageStatus(aiMessageId, MessageStatus.FAILED)
+                        Toast.makeText(this, reason, Toast.LENGTH_LONG).show()
+                        return@post
+                    }
+
+                    if (action == "done") {
+                        updateMessageStatus(aiMessageId, MessageStatus.SUCCESS)
+                        return@post
+                    }
+
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        Thread {
+                            val success = GhostAccessibilityService.executeAction(responseJson)
+
+                            Handler(Looper.getMainLooper()).post {
+                                updateMessageStatus(
+                                    aiMessageId,
+                                    if (success) MessageStatus.SUCCESS else MessageStatus.FAILED
+                                )
+
+                                if (!success) {
+                                    Toast.makeText(
+                                        this,
+                                        "Action failed: $action",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            }
+                        }.start()
+                    }, 1200)
+
+                } catch (e: Exception) {
+                    messages.add(
+                        ChatMessage(
+                            text = "Invalid backend response: ${e.message}",
+                            isUser = false,
+                            actionJson = responseJson,
+                            status = MessageStatus.FAILED
+                        )
+                    )
+                }
+            }
+        }.start()
+    }
+
+    private fun buildAiMessageText(
+        action: String,
+        reason: String,
+        confidence: Double
+    ): String {
+        return when (action) {
+            "tap" -> "I will tap the target.\nReason: $reason\nConfidence: $confidence"
+            "swipe" -> "I will swipe on the screen.\nReason: $reason\nConfidence: $confidence"
+            "type" -> "I will type the required text.\nReason: $reason\nConfidence: $confidence"
+            "wait" -> "I will wait for the screen to load.\nReason: $reason\nConfidence: $confidence"
+            "done" -> "Task already done.\nReason: $reason\nConfidence: $confidence"
+            "ask_user" -> "Need your confirmation.\nReason: $reason"
+            else -> "Unknown action: $action\nReason: $reason"
+        }
+    }
+
+    private fun updateMessageStatus(messageId: String, status: MessageStatus) {
+        val index = messages.indexOfFirst { it.id == messageId }
+
+        if (index != -1) {
+            messages[index] = messages[index].copy(status = status)
         }
     }
 }

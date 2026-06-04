@@ -2,90 +2,195 @@ package com.example.ghostmachine
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.graphics.Bitmap
 import android.graphics.Path
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class GhostAccessibilityService : AccessibilityService() {
 
     companion object {
         var instance: GhostAccessibilityService? = null
 
-        fun tap(x: Float, y: Float): Boolean {
+        fun captureScreenJpegBytes(): ByteArray? {
             val service = instance
+
             if (service == null) {
                 Log.e("GhostService", "Accessibility service is not enabled")
-                return false
+                return null
             }
 
-            service.performTap(x, y)
-            return true
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                Log.e("GhostService", "Screenshot needs Android 11+")
+                return null
+            }
+
+            return service.takeScreenshotAsJpegBytes()
         }
 
         fun executeAction(actionJson: String): Boolean {
             val service = instance
+
             if (service == null) {
                 Log.e("GhostService", "Accessibility service is not enabled")
                 return false
             }
 
-            try {
-                val jsonObject = org.json.JSONObject(actionJson)
-                val action = jsonObject.optString("action")
+            return try {
+                val obj = JSONObject(actionJson)
+                val action = obj.optString("action")
+
                 when (action) {
                     "tap" -> {
-                        val x = jsonObject.optDouble("x", 0.0).toFloat()
-                        val y = jsonObject.optDouble("y", 0.0).toFloat()
+                        val x = obj.optDouble("x", -1.0).toFloat()
+                        val y = obj.optDouble("y", -1.0).toFloat()
+
+                        if (x < 0 || y < 0) {
+                            Log.e("GhostService", "Invalid tap coordinates: $x, $y")
+                            return false
+                        }
+
                         service.performTap(x, y)
-                        return true
+                        true
                     }
+
                     "swipe" -> {
-                        val startX = jsonObject.optDouble("startX", 0.0).toFloat()
-                        val startY = jsonObject.optDouble("startY", 0.0).toFloat()
-                        val endX = jsonObject.optDouble("endX", 0.0).toFloat()
-                        val endY = jsonObject.optDouble("endY", 0.0).toFloat()
-                        val duration = jsonObject.optLong("duration", 300)
-                        service.performSwipe(startX, startY, endX, endY, duration)
-                        return true
+                        val direction = obj.optString("direction", "")
+                        service.performDirectionalSwipe(direction)
+                        true
                     }
+
                     "type" -> {
-                        val text = jsonObject.optString("text", "")
-                        return service.performType(text)
+                        val text = obj.optString("text", "")
+                        service.performType(text)
+                    }
+
+                    "wait" -> {
+                        Thread.sleep(1000)
+                        true
+                    }
+
+                    "done" -> {
+                        Log.i("GhostService", "Goal already done")
+                        true
+                    }
+
+                    "ask_user" -> {
+                        val reason = obj.optString("reason", "Need user confirmation")
+                        Log.w("GhostService", "Ask user: $reason")
+                        false
+                    }
+
+                    else -> {
+                        Log.e("GhostService", "Unknown action: $action")
+                        false
                     }
                 }
+
             } catch (e: Exception) {
-                Log.e("GhostService", "Failed to parse JSON action", e)
+                Log.e("GhostService", "Failed to execute action JSON", e)
+                false
             }
-            return false
         }
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        Log.i("GhostService", "Service connected")
+        Log.i("GhostService", "Accessibility service connected")
     }
 
     override fun onDestroy() {
         super.onDestroy()
         instance = null
-        Log.i("GhostService", "Service destroyed")
+        Log.i("GhostService", "Accessibility service destroyed")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Not needed for fixed tap test
+        // Not needed for now
     }
 
     override fun onInterrupt() {
-        Log.i("GhostService", "Service interrupted")
+        Log.i("GhostService", "Accessibility service interrupted")
+    }
+
+    private fun takeScreenshotAsJpegBytes(): ByteArray? {
+        val latch = CountDownLatch(1)
+        var resultBitmap: Bitmap? = null
+
+        try {
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        try {
+                            val hardwareBitmap = Bitmap.wrapHardwareBuffer(
+                                screenshot.hardwareBuffer,
+                                screenshot.colorSpace
+                            )
+
+                            resultBitmap = hardwareBitmap?.copy(Bitmap.Config.ARGB_8888, false)
+
+                            hardwareBitmap?.recycle()
+                            screenshot.hardwareBuffer.close()
+
+                        } catch (e: Exception) {
+                            Log.e("GhostService", "Screenshot processing failed", e)
+                        }
+
+                        latch.countDown()
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        Log.e("GhostService", "Screenshot failed with code: $errorCode")
+                        latch.countDown()
+                    }
+                }
+            )
+        } catch (e: Exception) {
+            Log.e("GhostService", "takeScreenshot threw error", e)
+            return null
+        }
+
+        val completed = latch.await(5, TimeUnit.SECONDS)
+
+        if (!completed) {
+            Log.e("GhostService", "Screenshot timeout")
+            return null
+        }
+
+        val bitmap = resultBitmap ?: return null
+
+        return try {
+            val outputStream = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 70, outputStream)
+            bitmap.recycle()
+
+            val bytes = outputStream.toByteArray()
+            Log.i("GhostService", "Screenshot captured: ${bytes.size / 1024}KB")
+            bytes
+
+        } catch (e: Exception) {
+            Log.e("GhostService", "JPEG encoding failed", e)
+            bitmap.recycle()
+            null
+        }
     }
 
     private fun performTap(x: Float, y: Float) {
-        val path = Path()
-        path.moveTo(x, y)
-        path.lineTo(x, y)
+        val path = Path().apply {
+            moveTo(x, y)
+            lineTo(x, y)
+        }
 
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 100))
@@ -108,10 +213,67 @@ class GhostAccessibilityService : AccessibilityService() {
         )
     }
 
-    private fun performSwipe(startX: Float, startY: Float, endX: Float, endY: Float, duration: Long) {
-        val path = Path()
-        path.moveTo(startX, startY)
-        path.lineTo(endX, endY)
+    private fun performDirectionalSwipe(direction: String) {
+        val width = resources.displayMetrics.widthPixels.toFloat()
+        val height = resources.displayMetrics.heightPixels.toFloat()
+
+        val centerX = width / 2f
+        val centerY = height / 2f
+
+        val startX: Float
+        val startY: Float
+        val endX: Float
+        val endY: Float
+
+        when (direction) {
+            "up" -> {
+                startX = centerX
+                startY = height * 0.75f
+                endX = centerX
+                endY = height * 0.30f
+            }
+
+            "down" -> {
+                startX = centerX
+                startY = height * 0.30f
+                endX = centerX
+                endY = height * 0.75f
+            }
+
+            "left" -> {
+                startX = width * 0.80f
+                startY = centerY
+                endX = width * 0.20f
+                endY = centerY
+            }
+
+            "right" -> {
+                startX = width * 0.20f
+                startY = centerY
+                endX = width * 0.80f
+                endY = centerY
+            }
+
+            else -> {
+                Log.e("GhostService", "Invalid swipe direction: $direction")
+                return
+            }
+        }
+
+        performSwipe(startX, startY, endX, endY, 500)
+    }
+
+    private fun performSwipe(
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        duration: Long
+    ) {
+        val path = Path().apply {
+            moveTo(startX, startY)
+            lineTo(endX, endY)
+        }
 
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
@@ -122,7 +284,10 @@ class GhostAccessibilityService : AccessibilityService() {
             object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
                     super.onCompleted(gestureDescription)
-                    Log.i("GhostService", "Swipe completed from ($startX, $startY) to ($endX, $endY)")
+                    Log.i(
+                        "GhostService",
+                        "Swipe completed from ($startX,$startY) to ($endX,$endY)"
+                    )
                 }
 
                 override fun onCancelled(gestureDescription: GestureDescription?) {
@@ -135,27 +300,60 @@ class GhostAccessibilityService : AccessibilityService() {
     }
 
     private fun performType(text: String): Boolean {
-        val focusedNode = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        if (focusedNode == null) {
-            Log.e("GhostService", "No focused input field found to type")
+        var targetNode = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+
+        if (targetNode == null) {
+            targetNode = findEditableNode(rootInActiveWindow)
+        }
+
+        if (targetNode == null) {
+            Log.e("GhostService", "No editable input found")
             return false
         }
 
-        val arguments = Bundle()
-        arguments.putCharSequence(
+        targetNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+        val args = Bundle()
+        args.putCharSequence(
             AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
             text
         )
-        val success = focusedNode.performAction(
+
+        val success = targetNode.performAction(
             AccessibilityNodeInfo.ACTION_SET_TEXT,
-            arguments
+            args
         )
-        focusedNode.recycle()
+
+        targetNode.recycle()
+
         if (success) {
-            Log.i("GhostService", "Typed text successfully: $text")
+            Log.i("GhostService", "Typed text: $text")
         } else {
-            Log.e("GhostService", "Failed to perform SET_TEXT action")
+            Log.e("GhostService", "Typing failed")
         }
+
         return success
+    }
+
+    private fun findEditableNode(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (root == null) return null
+
+        if (root.isEditable) {
+            return root
+        }
+
+        for (i in 0 until root.childCount) {
+            val child = root.getChild(i) ?: continue
+            val result = findEditableNode(child)
+
+            if (result != null) {
+                return result
+            }
+
+            child.recycle()
+        }
+
+        return null
     }
 }
