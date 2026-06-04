@@ -44,7 +44,7 @@ def call_vision_model(command: str,screenshot_path: str) -> ActionResponse:
     # Sends command + screenshot to NVIDIA VLM and returns ActionResponse.
 
     prompt = build_vision_prompt(command)
-    print("PROMPT VALUE:", prompt)
+    # print("PROMPT VALUE:", prompt)
     image_base64 = encode_image_to_base64(screenshot_path)
 
     # calling actual vlm

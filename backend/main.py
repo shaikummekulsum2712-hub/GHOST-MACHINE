@@ -51,6 +51,7 @@ async def analyze_screen(
     """
     Main screenshot endpoint.
 
+
     Android sends:
     - command text
     - screenshot image file
