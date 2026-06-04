@@ -77,11 +77,7 @@ object ApiClient {
             Log.i("ApiClient", "Backend response code: $responseCode")
             Log.i("ApiClient", "Backend response: $response")
 
-            if (responseCode in 200..299) {
-                response.toString()
-            } else {
-                null
-            }
+            if (responseCode in 200..299) response.toString() else null
 
         } catch (e: Exception) {
             Log.e("ApiClient", "Failed to call /analyze-screen", e)
