@@ -15,6 +15,11 @@
 local.properties
 .env
 backend/.env
+backend/uploads/*.jpg
+backend/uploads/*.png
+backend/uploads/*.jpeg
+backend/uploads/*.webp
+!backend/uploads/.gitkeep
 
 
 ##
