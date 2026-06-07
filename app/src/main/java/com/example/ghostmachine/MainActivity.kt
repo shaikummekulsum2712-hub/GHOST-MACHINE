@@ -33,20 +33,24 @@ class MainActivity : ComponentActivity() {
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(20.dp)
+                            .padding(start = 20.dp, end = 20.dp, top = 60.dp, bottom = 20.dp)
                     ) {
                         Text(
                             text = "👻 Ghost Machine",
                             style = MaterialTheme.typography.headlineMedium
                         )
 
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(24.dp))
 
                         Text(
-                            text = "1. Grant mic permission.\n2. Enable Accessibility Service.\n3. Go to any app/home screen.\n4. Tap floating 👻 button and speak your command."
+                            text = "1. Grant mic permission.\n" +
+                                    "2. Enable Accessibility Service.\n" +
+                                    "3. Go to any app/home screen.\n" +
+                                    "4. Tap floating 👻 button and speak your command.",
+                            style = MaterialTheme.typography.bodyLarge
                         )
 
-                        Spacer(modifier = Modifier.height(20.dp))
+                        Spacer(modifier = Modifier.height(28.dp))
 
                         Button(
                             modifier = Modifier.fillMaxWidth(),
@@ -68,7 +72,7 @@ class MainActivity : ComponentActivity() {
                             Text("Open Accessibility Settings")
                         }
 
-                        Spacer(modifier = Modifier.height(20.dp))
+                        Spacer(modifier = Modifier.height(28.dp))
 
                         Text("Backend:")
                         Text("python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload")

@@ -12,7 +12,11 @@ object ApiClient {
 
     private const val BASE_URL = "http://127.0.0.1:8000"
 
-    fun analyzeScreen(command: String, screenshotBytes: ByteArray): String? {
+    fun analyzeScreen(
+        command: String,
+        screenshotBytes: ByteArray,
+        screenElementsJson: String
+    ): String? {
         var connection: HttpURLConnection? = null
 
         return try {
@@ -37,12 +41,21 @@ object ApiClient {
 
             val outputStream = DataOutputStream(connection.outputStream)
 
+            // command field
             outputStream.writeBytes(twoHyphens + boundary + lineEnd)
             outputStream.writeBytes("Content-Disposition: form-data; name=\"command\"$lineEnd")
             outputStream.writeBytes(lineEnd)
             outputStream.writeBytes(command)
             outputStream.writeBytes(lineEnd)
 
+            // screen_elements_json field
+            outputStream.writeBytes(twoHyphens + boundary + lineEnd)
+            outputStream.writeBytes("Content-Disposition: form-data; name=\"screen_elements_json\"$lineEnd")
+            outputStream.writeBytes(lineEnd)
+            outputStream.writeBytes(screenElementsJson)
+            outputStream.writeBytes(lineEnd)
+
+            // screenshot file
             outputStream.writeBytes(twoHyphens + boundary + lineEnd)
             outputStream.writeBytes(
                 "Content-Disposition: form-data; name=\"screenshot\"; filename=\"screen.jpg\"$lineEnd"
