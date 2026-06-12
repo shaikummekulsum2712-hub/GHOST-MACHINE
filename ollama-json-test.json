@@ -1,0 +1,11 @@
+{
+  "model": "qwen3-vl:2b",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Return only JSON: {\"action\":\"done\",\"reason\":\"test success\",\"confidence\":1}"
+    }
+  ],
+  "stream": false,
+  "format": "json"
+}

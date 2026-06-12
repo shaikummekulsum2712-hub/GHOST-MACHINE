@@ -22,7 +22,9 @@ Previous action:
 Visible UI elements:
 {elements_text}
 
-Return only ONE next action JSON.
+/no_think
+
+Return only short JSON. Do not explain. Do not think step by step.
 
 Rules:
 - Prefer element_id from visible UI elements.

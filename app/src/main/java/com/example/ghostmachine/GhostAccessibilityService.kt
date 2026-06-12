@@ -277,7 +277,7 @@ class GhostAccessibilityService : AccessibilityService() {
     }
 
     private fun runVisionLoop(command: String) {
-        val maxSteps = 4
+        val maxSteps = 2
         var lastActionSignature = ""
 
         for (step in 1..maxSteps) {
@@ -483,7 +483,7 @@ class GhostAccessibilityService : AccessibilityService() {
 
         visit(root)
 
-        return results.take(35)
+        return results.take(25)
     }
 
     private fun elementsToJson(elements: List<UiElement>): String {
@@ -568,7 +568,7 @@ class GhostAccessibilityService : AccessibilityService() {
 
         return try {
             val outputStream = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 70, outputStream)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 50, outputStream)
             bitmap.recycle()
             outputStream.toByteArray()
         } catch (e: Exception) {
