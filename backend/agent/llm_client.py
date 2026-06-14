@@ -13,7 +13,6 @@ from agent.prompt_builder import build_vision_prompt
 
 load_dotenv()
 
-
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:2b")
 
@@ -24,8 +23,7 @@ def encode_image_to_base64(image_path: str) -> str:
     if not image_file.exists():
         raise FileNotFoundError(f"Screenshot not found: {image_path}")
 
-    image_bytes = image_file.read_bytes()
-    return base64.b64encode(image_bytes).decode("utf-8")
+    return base64.b64encode(image_file.read_bytes()).decode("utf-8")
 
 
 def clean_model_json(model_text: str) -> str:
@@ -48,10 +46,9 @@ def clean_model_json(model_text: str) -> str:
 
     cleaned = cleaned[first_brace:last_brace + 1]
 
-    # Fix common model mistake:
+    # Fix bad coordinate mistake:
     # "x": 386, 223,
-    # becomes:
-    # "x": 386,
+    # -> "x": 386,
     cleaned = re.sub(
         r'("x"\s*:\s*-?\d+(?:\.\d+)?),\s*-?\d+(?:\.\d+)?\s*,',
         r'\1,',
@@ -71,12 +68,12 @@ def build_action_response_from_text(model_text: str) -> ActionResponse:
     clean_json = clean_model_json(model_text)
     action_dict = json.loads(clean_json)
 
-    # Fill missing fields so local model mistakes do not break backend
+    action_dict.setdefault("element_id", None)
+    action_dict.setdefault("grid_cell", None)
     action_dict.setdefault("x", None)
     action_dict.setdefault("y", None)
     action_dict.setdefault("text", None)
     action_dict.setdefault("direction", None)
-    action_dict.setdefault("element_id", None)
     action_dict.setdefault("target_text", None)
     action_dict.setdefault("target_description", None)
     action_dict.setdefault("reason", "No reason provided.")
@@ -88,11 +85,12 @@ def build_action_response_from_text(model_text: str) -> ActionResponse:
 def fallback_response(reason: str) -> ActionResponse:
     return ActionResponse(
         action="ask_user",
+        element_id=None,
+        grid_cell=None,
         x=None,
         y=None,
         text=None,
         direction=None,
-        element_id=None,
         target_text=None,
         target_description=None,
         reason=reason,
@@ -103,16 +101,19 @@ def fallback_response(reason: str) -> ActionResponse:
 def call_vision_model(
     command: str,
     screenshot_path: str,
-    screen_elements_json: str | None = None
+    screen_elements_json: str | None = None,
+    parsed_intent: str | None = None,
+    parsed_target: str | None = None,
+    android_uncertainty: str | None = None,
+    previous_action: str | None = None
 ) -> ActionResponse:
-    """
-    Uses ONLY local Ollama vision model.
-    No NVIDIA, Gemini, OpenRouter, HuggingFace API calls.
-    """
-
     prompt = build_vision_prompt(
         command=command,
-        screen_elements_json=screen_elements_json
+        screen_elements_json=screen_elements_json,
+        parsed_intent=parsed_intent,
+        parsed_target=parsed_target,
+        android_uncertainty=android_uncertainty,
+        previous_action=previous_action
     )
 
     image_base64 = encode_image_to_base64(screenshot_path)
@@ -133,17 +134,15 @@ def call_vision_model(
         "keep_alive": "30m",
         "options": {
             "temperature": 0,
-            "num_predict": 120,
-            "num_ctx": 3072
+            "num_predict": 80,
+            "num_ctx": 2048,
+            "top_k": 1,
+            "top_p": 0.1
         }
     }
 
     try:
-        response = requests.post(
-            url,
-            json=payload,
-            timeout=180
-        )
+        response = requests.post(url, json=payload, timeout=180)
 
         print("Ollama status code:", response.status_code)
         print("Ollama raw response:", response.text)
@@ -161,5 +160,5 @@ def call_vision_model(
         print("Ollama failed:", e)
 
         return fallback_response(
-            reason="Local Ollama model failed. Check if Ollama is running and qwen3-vl:2b is available."
+            reason="Local model failed. Please try again."
         )

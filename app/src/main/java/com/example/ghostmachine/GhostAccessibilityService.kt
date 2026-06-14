@@ -7,11 +7,13 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Path
+import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
@@ -26,23 +28,30 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import kotlin.math.sqrt
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.max
 
 class GhostAccessibilityService : AccessibilityService() {
+
+    companion object {
+        private const val TAG = "GhostService"
+    }
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val isRunning = AtomicBoolean(false)
 
     private var windowManager: WindowManager? = null
     private var overlayView: LinearLayout? = null
     private var ghostButton: Button? = null
     private var statusView: TextView? = null
+
     private var speechRecognizer: SpeechRecognizer? = null
-    private val mainHandler = Handler(Looper.getMainLooper())
 
     data class UiElement(
         val id: Int,
@@ -55,98 +64,106 @@ class GhostAccessibilityService : AccessibilityService() {
         val clickable: Boolean,
         val editable: Boolean
     ) {
-        fun centerX(): Float = ((left + right) / 2f)
-        fun centerY(): Float = ((top + bottom) / 2f)
+        fun centerX(): Float = (left + right) / 2f
+        fun centerY(): Float = (top + bottom) / 2f
     }
 
-    companion object {
-        var instance: GhostAccessibilityService? = null
-    }
+    data class ParsedCommand(
+        val intent: String,
+        val target: String
+    )
+
+    data class AndroidDecision(
+        val confident: Boolean,
+        val action: String,
+        val element: UiElement?,
+        val text: String?,
+        val direction: String?,
+        val reason: String,
+        val confidence: Double
+    )
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        instance = this
-        showFloatingButton()
-        Log.i("GhostService", "Accessibility service connected")
+        Log.d(TAG, "Accessibility service connected")
+        createOverlay()
+        initSpeechRecognizer()
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        // We do not need to react to every event right now.
+    }
+
+    override fun onInterrupt() {
+        Log.d(TAG, "Accessibility service interrupted")
     }
 
     override fun onDestroy() {
-        destroySpeechRecognizer()
-        removeFloatingButton()
-        instance = null
         super.onDestroy()
+
+        try {
+            speechRecognizer?.destroy()
+        } catch (_: Exception) {
+        }
+
+        try {
+            overlayView?.let { windowManager?.removeView(it) }
+        } catch (_: Exception) {
+        }
+
+        overlayView = null
+        ghostButton = null
+        statusView = null
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-
-    override fun onInterrupt() {
-        Log.i("GhostService", "Accessibility interrupted")
-    }
-
-    private fun showFloatingButton() {
+    private fun createOverlay() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(8, 8, 8, 8)
+            setPadding(10, 10, 10, 10)
         }
 
-        ghostButton = Button(this).apply {
+        val button = Button(this).apply {
             text = "👻"
             textSize = 22f
             setOnClickListener {
-                startListeningFromOverlay()
+                startVoiceInput()
             }
         }
 
-        statusView = TextView(this).apply {
+        val status = TextView(this).apply {
             text = "Ready"
-            textSize = 12f
+            textSize = 13f
             setPadding(8, 4, 8, 4)
-            maxLines = 2
+            setBackgroundColor(0xCC000000.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
         }
 
-        container.addView(ghostButton, LinearLayout.LayoutParams(150, 150))
-        container.addView(
-            statusView,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-        )
-
-        overlayView = container
+        container.addView(button)
+        container.addView(status)
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            android.graphics.PixelFormat.TRANSLUCENT
-        )
-
-        params.gravity = Gravity.TOP or Gravity.END
-        params.x = 20
-        params.y = 420
-
-        try {
-            windowManager?.addView(overlayView, params)
-            Log.i("GhostService", "Floating overlay added")
-        } catch (e: Exception) {
-            Log.e("GhostService", "Failed to add floating overlay", e)
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = 20
+            y = 420
         }
-    }
 
-    private fun removeFloatingButton() {
+        overlayView = container
+        ghostButton = button
+        statusView = status
+
         try {
-            overlayView?.let {
-                windowManager?.removeView(it)
-                overlayView = null
-                ghostButton = null
-                statusView = null
-            }
+            windowManager?.addView(container, params)
         } catch (e: Exception) {
-            Log.e("GhostService", "Failed to remove floating overlay", e)
+            Log.e(TAG, "Failed to add overlay", e)
         }
     }
 
@@ -156,271 +173,17 @@ class GhostAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun startListeningFromOverlay() {
-        Log.i("GhostService", "Ghost button clicked")
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            showToast("Open Ghost Machine app and grant mic permission first")
-            return
+    private fun showOverlayWithStatus(message: String) {
+        mainHandler.post {
+            overlayView?.visibility = View.VISIBLE
+            ghostButton?.text = "👻"
+            statusView?.text = message
         }
-
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            showToast("Speech recognition not available on this phone")
-            return
-        }
-
-        showToast("Listening...")
-        setOverlayStatus("Listening...")
-        ghostButton?.text = "🎙️"
-
-        destroySpeechRecognizer()
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-
-        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                Log.i("GhostService", "Ready for speech")
-            }
-
-            override fun onBeginningOfSpeech() {
-                Log.i("GhostService", "Speech started")
-            }
-
-            override fun onRmsChanged(rmsdB: Float) {}
-
-            override fun onBufferReceived(buffer: ByteArray?) {}
-
-            override fun onEndOfSpeech() {
-                Log.i("GhostService", "Speech ended")
-            }
-
-            override fun onError(error: Int) {
-                Log.e("GhostService", "Speech error code: $error")
-                ghostButton?.text = "👻"
-                setOverlayStatus("Ready")
-                destroySpeechRecognizer()
-                showToast("Voice failed. Try again.")
-            }
-
-            override fun onResults(results: Bundle?) {
-                val spokenText = results
-                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-
-                ghostButton?.text = "👻"
-                destroySpeechRecognizer()
-
-                if (spokenText.isNullOrBlank()) {
-                    setOverlayStatus("Ready")
-                    showToast("No command heard")
-                    return
-                }
-
-                Log.i("GhostService", "Voice command: $spokenText")
-                setOverlayStatus("Heard: $spokenText")
-                runCommandFromOverlay(spokenText)
-            }
-
-            override fun onPartialResults(partialResults: Bundle?) {
-                val partial = partialResults
-                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-
-                Log.i("GhostService", "Partial speech: $partial")
-
-                if (!partial.isNullOrBlank()) {
-                    setOverlayStatus("Hearing: $partial")
-                }
-            }
-
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-        }
-
-        speechRecognizer?.startListening(intent)
     }
 
-    private fun destroySpeechRecognizer() {
-        try {
-            speechRecognizer?.stopListening()
-            speechRecognizer?.destroy()
-        } catch (_: Exception) {
-        }
-
-        speechRecognizer = null
-    }
-
-    private fun runCommandFromOverlay(command: String) {
-        showToast("Ghost heard: $command")
-        setOverlayStatus("Heard: $command")
-
-        if (handleDirectOpenCommand(command)) {
-            setOverlayStatus("Ready")
-            return
-        }
-
-        mainHandler.postDelayed({
-            Thread {
-                runVisionLoop(command)
-            }.start()
-        }, 700)
-    }
-
-    private fun runVisionLoop(command: String) {
-        val maxSteps = 2
-        var lastActionSignature = ""
-
-        for (step in 1..maxSteps) {
-            showOverlayWithStatus("Capturing screen...")
-            Thread.sleep(400)
-
-            hideOverlayForScreenshot()
-            Thread.sleep(500)
-
-            val screenshotBytes = captureScreenJpegBytes()
-
-            if (screenshotBytes == null) {
-                showToast("Screenshot failed")
-                break
-            }
-            showOverlayWithStatus("Thinking...")
-
-            val elements = collectScreenElements()
-            val elementsJson = elementsToJson(elements)
-
-            Log.i("GhostService", "Collected elements: ${elements.size}")
-
-            val responseJson = ApiClient.analyzeScreen(
-                command = command,
-                screenshotBytes = screenshotBytes,
-                screenElementsJson = elementsJson
-            )
-
-            showOverlayWithStatus("Executing...")
-
-            if (responseJson == null) {
-                showOverlayWithStatus("Something went wrong. Please try again.")
-                showToast("Something went wrong. Check backend logs.")
-                break
-            }
-
-
-
-            Log.i("GhostService", "Backend action: $responseJson")
-
-            val obj = JSONObject(responseJson)
-            val action = obj.optString("action", "")
-            val elementId = if (obj.isNull("element_id")) null else obj.optInt("element_id")
-            val targetText = obj.optString("target_text", "")
-            val reason = obj.optString("reason", "")
-
-            val signature = "$action-$elementId-$targetText-$reason"
-
-            if (signature == lastActionSignature) {
-                Log.w("GhostService", "Repeated same action. Stopping loop.")
-                showToast("Stopped repeated action")
-                break
-            }
-
-            lastActionSignature = signature
-
-            if (action == "done") {
-                showToast("Ghost finished")
-                break
-            }
-
-            if (action == "ask_user") {
-                val friendlyReason = reason.ifBlank { "I could not complete this. Please try again." }
-                showOverlayWithStatus(friendlyReason)
-                showToast(friendlyReason)
-                break
-            }
-
-            val success = executeAction(responseJson, elements)
-
-            if (!success) {
-                showToast("Action failed")
-                break
-            }
-
-            Thread.sleep(1300)
-        }
-
-        showButtonAgain()
-    }
-
-    private fun handleDirectOpenCommand(command: String): Boolean {
-        val lower = command.lowercase()
-
-        if (lower.contains("open whatsapp") || lower.contains("launch whatsapp")) {
-            val openedNormal = openAppByPackage("com.whatsapp", "WhatsApp")
-
-            if (!openedNormal) {
-                openAppByPackage("com.whatsapp.w4b", "WhatsApp Business")
-            }
-
-            return true
-        }
-
-        if (lower.contains("open google") || lower.contains("launch google")) {
-            return openAppByPackage(
-                "com.google.android.googlequicksearchbox",
-                "Google"
-            )
-        }
-
-        if (lower.contains("open chrome") || lower.contains("launch chrome")) {
-            return openAppByPackage(
-                "com.android.chrome",
-                "Chrome"
-            )
-        }
-
-        if (lower.contains("open youtube") || lower.contains("launch youtube")) {
-            return openAppByPackage(
-                "com.google.android.youtube",
-                "YouTube"
-            )
-        }
-
-        if (lower.contains("open settings") || lower.contains("launch settings")) {
-            val intent = Intent(android.provider.Settings.ACTION_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(intent)
-            showToast("Opened Settings")
-            return true
-        }
-
-        return false
-    }
-
-    private fun openAppByPackage(packageName: String, appName: String): Boolean {
-        return try {
-            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-
-            if (launchIntent == null) {
-                Log.e("GhostService", "$appName package not found: $packageName")
-                return false
-            }
-
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            startActivity(launchIntent)
-            showToast("Opened $appName")
-            true
-        } catch (e: Exception) {
-            Log.e("GhostService", "Failed to open $appName", e)
-            false
+    private fun hideOverlayForScreenshot() {
+        mainHandler.post {
+            overlayView?.visibility = View.GONE
         }
     }
 
@@ -438,30 +201,625 @@ class GhostAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun initSpeechRecognizer() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            setOverlayStatus("Speech not available")
+            return
+        }
+
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+
+        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                setOverlayStatus("Listening...")
+            }
+
+            override fun onBeginningOfSpeech() {
+                setOverlayStatus("Hearing...")
+            }
+
+            override fun onRmsChanged(rmsdB: Float) {}
+
+            override fun onBufferReceived(buffer: ByteArray?) {}
+
+            override fun onEndOfSpeech() {
+                setOverlayStatus("Processing voice...")
+            }
+
+            override fun onError(error: Int) {
+                Log.e(TAG, "Speech error: $error")
+                setOverlayStatus("Voice error. Try again.")
+            }
+
+            override fun onResults(results: Bundle?) {
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val command = matches?.firstOrNull()?.trim()
+
+                if (command.isNullOrBlank()) {
+                    setOverlayStatus("No command heard")
+                    return
+                }
+
+                Log.d(TAG, "Voice command: $command")
+                runCommandFromOverlay(command)
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val partial = matches?.firstOrNull()?.trim()
+                if (!partial.isNullOrBlank()) {
+                    setOverlayStatus("Hearing: $partial")
+                }
+            }
+
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+    }
+
+    private fun startVoiceInput() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED
+        ) {
+            setOverlayStatus("Mic permission needed")
+            showToast("Open app and allow microphone permission")
+            return
+        }
+
+        if (isRunning.get()) {
+            setOverlayStatus("Busy...")
+            return
+        }
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+        }
+
+        try {
+            speechRecognizer?.startListening(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "startListening failed", e)
+            setOverlayStatus("Could not start voice")
+        }
+    }
+
+    private fun runCommandFromOverlay(command: String) {
+        showToast("Ghost heard: $command")
+        setOverlayStatus("Heard: $command")
+
+        if (handleDirectOpenCommand(command)) {
+            mainHandler.postDelayed({ showButtonAgain() }, 900)
+            return
+        }
+
+        Thread {
+            runVisionLoop(command)
+        }.start()
+    }
+
+    private fun handleDirectOpenCommand(command: String): Boolean {
+        val lower = command.lowercase().trim()
+
+        val packageName = when {
+            lower.contains("open whatsapp business") -> "com.whatsapp.w4b"
+            lower == "open whatsapp" || lower.contains("open whatsapp") -> "com.whatsapp"
+            lower.contains("open youtube") -> "com.google.android.youtube"
+            lower.contains("open chrome") -> "com.android.chrome"
+            lower.contains("open google") -> "com.google.android.googlequicksearchbox"
+            else -> null
+        }
+
+        if (packageName != null) {
+            return openApp(packageName)
+        }
+
+        if (lower.contains("open settings")) {
+            return try {
+                val intent = Intent(Settings.ACTION_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(intent)
+                setOverlayStatus("Opened settings")
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Open settings failed", e)
+                false
+            }
+        }
+
+        return false
+    }
+
+    private fun openApp(packageName: String): Boolean {
+        return try {
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
+            if (launchIntent == null) {
+                setOverlayStatus("App not found")
+                return false
+            }
+
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(launchIntent)
+            setOverlayStatus("Opened app")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Open app failed: $packageName", e)
+            setOverlayStatus("Could not open app")
+            false
+        }
+    }
+
+    private fun parseCommand(command: String): ParsedCommand {
+        val lower = command.lowercase().trim()
+
+        return when {
+            lower.startsWith("search for ") -> {
+                ParsedCommand("search", command.substringAfter("search for").trim())
+            }
+
+            lower.startsWith("type ") -> {
+                ParsedCommand("type", command.substringAfter("type").trim())
+            }
+
+            lower.startsWith("write ") -> {
+                ParsedCommand("type", command.substringAfter("write").trim())
+            }
+
+            lower.startsWith("open chat ") -> {
+                ParsedCommand("open_chat", command.substringAfter("open chat").trim())
+            }
+
+            lower.startsWith("tap ") -> {
+                ParsedCommand("tap", command.substringAfter("tap").trim())
+            }
+
+            lower.startsWith("click ") -> {
+                ParsedCommand("tap", command.substringAfter("click").trim())
+            }
+
+            lower.contains("scroll down") -> ParsedCommand("scroll", "down")
+            lower.contains("scroll up") -> ParsedCommand("scroll", "up")
+            lower.contains("swipe down") -> ParsedCommand("scroll", "down")
+            lower.contains("swipe up") -> ParsedCommand("scroll", "up")
+            lower.contains("go back") -> ParsedCommand("back", "")
+            lower == "back" -> ParsedCommand("back", "")
+            lower == "home" -> ParsedCommand("home", "")
+
+            else -> ParsedCommand("unknown", command)
+        }
+    }
+
+    private fun runVisionLoop(command: String) {
+        if (!isRunning.compareAndSet(false, true)) {
+            showOverlayWithStatus("Already running")
+            return
+        }
+
+        val parsed = parseCommand(command)
+        var previousAction: String? = null
+        val maxSteps = 2
+
+        try {
+            for (step in 1..maxSteps) {
+                showOverlayWithStatus("Checking screen...")
+
+                val elements = collectScreenElements()
+
+                if (isTaskDone(parsed, elements, previousAction)) {
+                    showOverlayWithStatus("Done")
+                    Thread.sleep(700)
+                    break
+                }
+
+                val androidDecision = decideWithAndroidOnly(parsed, elements)
+
+                if (androidDecision.confident) {
+                    showOverlayWithStatus("Doing it...")
+
+                    val success = executeAndroidDecision(androidDecision)
+                    previousAction = androidDecision.action
+
+                    if (!success) {
+                        showOverlayWithStatus("I could not do that.")
+                        Thread.sleep(900)
+                        break
+                    }
+
+                    Thread.sleep(800)
+
+                    val newElements = collectScreenElements()
+                    if (isTaskDone(parsed, newElements, previousAction)) {
+                        showOverlayWithStatus("Done")
+                        Thread.sleep(700)
+                        break
+                    }
+
+                    continue
+                }
+
+                showOverlayWithStatus("Thinking...")
+                Thread.sleep(300)
+
+                hideOverlayForScreenshot()
+                Thread.sleep(300)
+
+                val screenshotBytes = captureScreenJpegBytes()
+
+                showOverlayWithStatus("Thinking...")
+
+                if (screenshotBytes == null) {
+                    showOverlayWithStatus("Could not capture screen.")
+                    Thread.sleep(900)
+                    break
+                }
+
+                val compactElementsJson = elementsToJson(elements, parsed)
+
+                val responseJson = ApiClient.analyzeScreen(
+                    command = command,
+                    screenshotBytes = screenshotBytes,
+                    screenElementsJson = compactElementsJson,
+                    parsedIntent = parsed.intent,
+                    parsedTarget = parsed.target,
+                    androidUncertainty = androidDecision.reason,
+                    previousAction = previousAction
+                )
+
+                if (responseJson == null) {
+                    showOverlayWithStatus("Something went wrong.")
+                    Thread.sleep(900)
+                    break
+                }
+
+                showOverlayWithStatus("Executing...")
+
+                val success = executeVlmAction(responseJson, elements)
+                previousAction = responseJson
+
+                if (!success) {
+                    showOverlayWithStatus("I could not complete this.")
+                    Thread.sleep(900)
+                    break
+                }
+
+                Thread.sleep(900)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "runVisionLoop failed", e)
+            showOverlayWithStatus("Something went wrong.")
+            Thread.sleep(900)
+        } finally {
+            isRunning.set(false)
+            showButtonAgain()
+        }
+    }
+
+    private fun decideWithAndroidOnly(
+        parsed: ParsedCommand,
+        elements: List<UiElement>
+    ): AndroidDecision {
+        val intent = parsed.intent
+        val target = parsed.target.lowercase().trim()
+
+        if (intent == "back") {
+            return AndroidDecision(true, "back", null, null, null, "direct back", 1.0)
+        }
+
+        if (intent == "home") {
+            return AndroidDecision(true, "home", null, null, null, "direct home", 1.0)
+        }
+
+        if (intent == "scroll") {
+            return AndroidDecision(true, "swipe", null, null, parsed.target, "direct scroll", 1.0)
+        }
+
+        if (intent == "type") {
+            val editable = elements.firstOrNull { it.editable }
+            if (editable != null || isAnyInputFocused()) {
+                return AndroidDecision(true, "type", editable, parsed.target, null, "input ready", 0.95)
+            }
+        }
+
+        if (intent == "search") {
+            val searchMatches = elements.filter {
+                val t = (it.text ?: "").lowercase()
+                val d = (it.contentDescription ?: "").lowercase()
+                it.editable || t.contains("search") || d.contains("search")
+            }
+
+            val editableSearch = searchMatches.firstOrNull { it.editable }
+
+            if (editableSearch != null) {
+                return AndroidDecision(
+                    true,
+                    "tap_then_type",
+                    editableSearch,
+                    parsed.target,
+                    null,
+                    "search field found",
+                    0.95
+                )
+            }
+
+            if (searchMatches.size == 1) {
+                return AndroidDecision(
+                    true,
+                    "tap_then_type",
+                    searchMatches.first(),
+                    parsed.target,
+                    null,
+                    "search element found",
+                    0.85
+                )
+            }
+
+            return AndroidDecision(
+                false,
+                "none",
+                null,
+                null,
+                null,
+                "multiple or no search matches",
+                0.4
+            )
+        }
+
+        if (intent == "tap") {
+            val matches = elements.filter {
+                val t = (it.text ?: "").lowercase()
+                val d = (it.contentDescription ?: "").lowercase()
+                target.isNotBlank() && (t.contains(target) || d.contains(target))
+            }
+
+            if (matches.size == 1) {
+                return AndroidDecision(
+                    true,
+                    "tap",
+                    matches.first(),
+                    null,
+                    null,
+                    "single tap match",
+                    0.9
+                )
+            }
+
+            return AndroidDecision(
+                false,
+                "none",
+                null,
+                null,
+                null,
+                "tap target unclear",
+                0.35
+            )
+        }
+
+        if (intent == "open_chat") {
+            val matches = elements.filter {
+                val t = (it.text ?: "").lowercase()
+                target.isNotBlank() && t.contains(target)
+            }
+
+            if (matches.size == 1) {
+                return AndroidDecision(
+                    true,
+                    "tap",
+                    matches.first(),
+                    null,
+                    null,
+                    "chat match found",
+                    0.9
+                )
+            }
+
+            return AndroidDecision(
+                false,
+                "none",
+                null,
+                null,
+                null,
+                "chat target unclear",
+                0.35
+            )
+        }
+
+        return AndroidDecision(
+            false,
+            "none",
+            null,
+            null,
+            null,
+            "unknown command",
+            0.2
+        )
+    }
+
+    private fun executeAndroidDecision(decision: AndroidDecision): Boolean {
+        return when (decision.action) {
+            "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
+
+            "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
+
+            "swipe" -> {
+                performDirectionalSwipe(decision.direction ?: "down")
+            }
+
+            "type" -> {
+                val text = decision.text ?: return false
+                performType(text)
+            }
+
+            "tap" -> {
+                val element = decision.element ?: return false
+                performTap(element.centerX(), element.centerY())
+            }
+
+            "tap_then_type" -> {
+                val element = decision.element ?: return false
+                val text = decision.text ?: return false
+
+                val tapped = performTap(element.centerX(), element.centerY())
+                if (!tapped) return false
+
+                Thread.sleep(700)
+                performType(text)
+            }
+
+            else -> false
+        }
+    }
+
+    private fun executeVlmAction(responseJson: String, elements: List<UiElement>): Boolean {
+        return try {
+            val obj = JSONObject(responseJson)
+
+            val action = obj.optString("action")
+            val elementId = if (obj.isNull("element_id")) null else obj.optInt("element_id")
+            val gridCell = if (obj.isNull("grid_cell")) null else obj.optString("grid_cell")
+            val text = if (obj.isNull("text")) null else obj.optString("text")
+            val direction = if (obj.isNull("direction")) null else obj.optString("direction")
+            val reason = obj.optString("reason", "")
+
+            when (action) {
+                "done" -> {
+                    showOverlayWithStatus("Done")
+                    true
+                }
+
+                "ask_user" -> {
+                    showOverlayWithStatus(reason.ifBlank { "I need help." })
+                    false
+                }
+
+                "type" -> {
+                    val value = text ?: return false
+                    performType(value)
+                }
+
+                "swipe" -> {
+                    performDirectionalSwipe(direction ?: "down")
+                }
+
+                "tap" -> {
+                    if (elementId != null) {
+                        val element = elements.firstOrNull { it.id == elementId }
+                        if (element != null) {
+                            return performTap(element.centerX(), element.centerY())
+                        }
+                    }
+
+                    if (!gridCell.isNullOrBlank()) {
+                        val metrics = resources.displayMetrics
+                        val point = gridCellToPoint(
+                            gridCell,
+                            metrics.widthPixels,
+                            metrics.heightPixels
+                        )
+                        if (point != null) {
+                            return performTap(point.first, point.second)
+                        }
+                    }
+
+                    val x = if (obj.isNull("x")) null else obj.optDouble("x").toFloat()
+                    val y = if (obj.isNull("y")) null else obj.optDouble("y").toFloat()
+
+                    if (x != null && y != null) {
+                        return performTap(x, y)
+                    }
+
+                    false
+                }
+
+                "wait" -> {
+                    Thread.sleep(800)
+                    true
+                }
+
+                else -> false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "executeVlmAction failed", e)
+            false
+        }
+    }
+
+    private fun isTaskDone(
+        parsed: ParsedCommand,
+        elements: List<UiElement>,
+        lastAction: String?
+    ): Boolean {
+        val intent = parsed.intent
+        val target = parsed.target.lowercase().trim()
+
+        if (lastAction == "tap_then_type" && intent == "search") {
+            return true
+        }
+
+        if (lastAction == "type" && intent == "type") {
+            return true
+        }
+
+        if (lastAction == "tap" && intent == "tap") {
+            return true
+        }
+
+        if (lastAction == "swipe" && intent == "scroll") {
+            return true
+        }
+
+        if (intent == "open_chat" && target.isNotBlank()) {
+            val hasTarget = elements.any {
+                val t = (it.text ?: "").lowercase()
+                t.contains(target)
+            }
+
+            val hasMessageInput = elements.any {
+                val t = (it.text ?: "").lowercase()
+                val d = (it.contentDescription ?: "").lowercase()
+                it.editable || t.contains("message") || d.contains("message")
+            }
+
+            if (hasTarget && hasMessageInput) {
+                return true
+            }
+        }
+
+        return false
+    }
+
     private fun collectScreenElements(): List<UiElement> {
         val root = rootInActiveWindow ?: return emptyList()
         val results = mutableListOf<UiElement>()
-        var nextId = 1
 
         fun visit(node: AccessibilityNodeInfo?) {
             if (node == null) return
+            if (results.size > 80) return
 
             val rect = Rect()
             node.getBoundsInScreen(rect)
 
             val text = node.text?.toString()
             val desc = node.contentDescription?.toString()
+            val className = node.className?.toString() ?: ""
 
-            val useful =
-                !text.isNullOrBlank() ||
-                        !desc.isNullOrBlank() ||
-                        node.isClickable ||
-                        node.isEditable
+            val editable = try {
+                node.isEditable || className.contains("EditText", ignoreCase = true)
+            } catch (_: Exception) {
+                className.contains("EditText", ignoreCase = true)
+            }
 
-            if (useful && !rect.isEmpty) {
+            val usefulText = !text.isNullOrBlank() || !desc.isNullOrBlank()
+            val validBounds = rect.width() > 5 && rect.height() > 5
+
+            if (validBounds && (usefulText || node.isClickable || editable)) {
                 results.add(
                     UiElement(
-                        id = nextId,
+                        id = results.size,
                         text = text,
                         contentDescription = desc,
                         left = rect.left,
@@ -469,11 +827,9 @@ class GhostAccessibilityService : AccessibilityService() {
                         right = rect.right,
                         bottom = rect.bottom,
                         clickable = node.isClickable,
-                        editable = node.isEditable
+                        editable = editable
                     )
                 )
-
-                nextId++
             }
 
             for (i in 0 until node.childCount) {
@@ -482,20 +838,45 @@ class GhostAccessibilityService : AccessibilityService() {
         }
 
         visit(root)
-
-        return results.take(25)
+        return results
     }
 
-    private fun elementsToJson(elements: List<UiElement>): String {
+    private fun elementsToJson(elements: List<UiElement>, parsed: ParsedCommand): String {
+        val targetWords = parsed.target.lowercase()
+            .split(" ")
+            .filter { it.length > 1 }
+
+        val intent = parsed.intent
+
+        val ranked = elements.sortedByDescending { element ->
+            var score = 0
+
+            val t = (element.text ?: "").lowercase()
+            val d = (element.contentDescription ?: "").lowercase()
+
+            if (element.editable) score += 100
+            if (element.clickable) score += 40
+
+            if (intent == "search" && (t.contains("search") || d.contains("search"))) {
+                score += 100
+            }
+
+            targetWords.forEach { word ->
+                if (t.contains(word) || d.contains(word)) score += 80
+            }
+
+            score
+        }.take(15)
+
         val arr = JSONArray()
 
-        for (element in elements) {
+        ranked.forEach { element ->
             val obj = JSONObject()
-            obj.put("id", element.id)
-            obj.put("text", element.text)
-            obj.put("content_description", element.contentDescription)
+            obj.put("i", element.id)
+            obj.put("t", element.text ?: "")
+            obj.put("d", element.contentDescription ?: "")
             obj.put(
-                "bounds",
+                "b",
                 JSONArray(
                     listOf(
                         element.left,
@@ -505,161 +886,75 @@ class GhostAccessibilityService : AccessibilityService() {
                     )
                 )
             )
-            obj.put("clickable", element.clickable)
-            obj.put("editable", element.editable)
-
+            obj.put("c", if (element.clickable) 1 else 0)
+            obj.put("e", if (element.editable) 1 else 0)
             arr.put(obj)
         }
 
         return arr.toString()
     }
 
-    private fun captureScreenJpegBytes(): ByteArray? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            Log.e("GhostService", "Screenshot needs Android 11+")
-            return null
-        }
-
-        val latch = CountDownLatch(1)
-        var resultBitmap: Bitmap? = null
-
-        try {
-            takeScreenshot(
-                Display.DEFAULT_DISPLAY,
-                mainExecutor,
-                object : TakeScreenshotCallback {
-                    override fun onSuccess(screenshot: ScreenshotResult) {
-                        try {
-                            val hardwareBitmap = Bitmap.wrapHardwareBuffer(
-                                screenshot.hardwareBuffer,
-                                screenshot.colorSpace
-                            )
-
-                            resultBitmap = hardwareBitmap?.copy(Bitmap.Config.ARGB_8888, false)
-
-                            hardwareBitmap?.recycle()
-                            screenshot.hardwareBuffer.close()
-                        } catch (e: Exception) {
-                            Log.e("GhostService", "Screenshot processing failed", e)
-                        }
-
-                        latch.countDown()
-                    }
-
-                    override fun onFailure(errorCode: Int) {
-                        Log.e("GhostService", "Screenshot failed code: $errorCode")
-                        latch.countDown()
-                    }
-                }
-            )
-        } catch (e: Exception) {
-            Log.e("GhostService", "takeScreenshot error", e)
-            return null
-        }
-
-        val completed = latch.await(5, TimeUnit.SECONDS)
-
-        if (!completed) {
-            Log.e("GhostService", "Screenshot timeout")
-            return null
-        }
-
-        val bitmap = resultBitmap ?: return null
-
+    private fun isAnyInputFocused(): Boolean {
         return try {
-            val outputStream = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 50, outputStream)
-            bitmap.recycle()
-            outputStream.toByteArray()
-        } catch (e: Exception) {
-            Log.e("GhostService", "JPEG conversion failed", e)
-            bitmap.recycle()
-            null
+            rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) != null
+        } catch (_: Exception) {
+            false
         }
     }
 
-    private fun executeAction(
-        actionJson: String,
-        elements: List<UiElement>
-    ): Boolean {
+    private fun findEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+
+        val className = node.className?.toString() ?: ""
+        val editable = try {
+            node.isEditable || className.contains("EditText", ignoreCase = true)
+        } catch (_: Exception) {
+            className.contains("EditText", ignoreCase = true)
+        }
+
+        if (editable) return node
+
+        for (i in 0 until node.childCount) {
+            val found = findEditableNode(node.getChild(i))
+            if (found != null) return found
+        }
+
+        return null
+    }
+
+    private fun performType(text: String): Boolean {
         return try {
-            val obj = JSONObject(actionJson)
-            val action = obj.optString("action")
+            val root = rootInActiveWindow
+            val focused = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            val target = focused ?: findEditableNode(root)
 
-            when (action) {
-                "tap" -> {
-                    val elementId = if (obj.isNull("element_id")) null else obj.optInt("element_id")
-                    val x = obj.optDouble("x", -1.0).toFloat()
-                    val y = obj.optDouble("y", -1.0).toFloat()
-                    val textToType = obj.optString("text", "").trim()
-
-                    var tapSuccess = false
-
-                    if (elementId != null) {
-                        val element = elements.firstOrNull { it.id == elementId }
-
-                        if (element != null) {
-                            Log.i("GhostService", "Tapping element_id=$elementId")
-                            tapSuccess = performTap(element.centerX(), element.centerY())
-                        }
-                    }
-
-                    if (!tapSuccess && x >= 0 && y >= 0) {
-                        Log.i("GhostService", "Using VLM fallback x/y")
-                        tapSuccess = performTap(x, y)
-                    }
-
-                    if (!tapSuccess) {
-                        return false
-                    }
-
-                    // Important fix:
-                    // If model returned tap + text, treat it as tap field then type text.
-                    if (textToType.isNotBlank()) {
-                        Log.i("GhostService", "Tap action also has text, typing after tap: $textToType")
-                        Thread.sleep(700)
-                        return performType(textToType)
-                    }
-
-                    true
-                }
-
-                "swipe" -> {
-                    val direction = obj.optString("direction", "")
-                    performDirectionalSwipe(direction)
-                }
-
-                "type" -> {
-                    val text = obj.optString("text", "")
-                    performType(text)
-                }
-
-                "wait" -> {
-                    Thread.sleep(1000)
-                    true
-                }
-
-                "done" -> true
-
-                "ask_user" -> {
-                    val reason = obj.optString("reason", "Need user help")
-                    showToast(reason)
-                    false
-                }
-
-                else -> false
+            if (target == null) {
+                Log.e(TAG, "No editable field found")
+                return false
             }
+
+            val args = Bundle().apply {
+                putCharSequence(
+                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    text
+                )
+            }
+
+            val success = target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+
+            if (!success) {
+                Log.e(TAG, "ACTION_SET_TEXT failed")
+            }
+
+            success
         } catch (e: Exception) {
-            Log.e("GhostService", "Action execution failed", e)
+            Log.e(TAG, "performType failed", e)
             false
         }
     }
 
     private fun performTap(x: Float, y: Float): Boolean {
-        val latch = CountDownLatch(1)
-        var success = false
-
-        mainHandler.post {
+        return try {
             val path = Path().apply {
                 moveTo(x, y)
                 lineTo(x + 1f, y + 1f)
@@ -669,6 +964,9 @@ class GhostAccessibilityService : AccessibilityService() {
                 .addStroke(GestureDescription.StrokeDescription(path, 0, 180))
                 .build()
 
+            val latch = CountDownLatch(1)
+            var success = false
+
             dispatchGesture(
                 gesture,
                 object : GestureResultCallback() {
@@ -682,81 +980,82 @@ class GhostAccessibilityService : AccessibilityService() {
                         latch.countDown()
                     }
                 },
-                null
+                mainHandler
             )
-        }
 
-        latch.await(3, TimeUnit.SECONDS)
-        Log.i("GhostService", "Tap result: $success at $x,$y")
-        return success
+            latch.await(2, TimeUnit.SECONDS)
+            success
+        } catch (e: Exception) {
+            Log.e(TAG, "performTap failed", e)
+            false
+        }
     }
 
     private fun performDirectionalSwipe(direction: String): Boolean {
-        val width = resources.displayMetrics.widthPixels.toFloat()
-        val height = resources.displayMetrics.heightPixels.toFloat()
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
 
-        val centerX = width / 2f
-        val centerY = height / 2f
+        val startX = width / 2f
+        val endX = width / 2f
+        var startY = height / 2f
+        var endY = height / 2f
 
-        val startX: Float
-        val startY: Float
-        val endX: Float
-        val endY: Float
-
-        when (direction) {
+        when (direction.lowercase()) {
             "up" -> {
-                startX = centerX
                 startY = height * 0.75f
-                endX = centerX
                 endY = height * 0.30f
             }
 
             "down" -> {
-                startX = centerX
                 startY = height * 0.30f
-                endX = centerX
                 endY = height * 0.75f
             }
 
             "left" -> {
-                startX = width * 0.80f
-                startY = centerY
-                endX = width * 0.20f
-                endY = centerY
+                return performHorizontalSwipe(left = true)
             }
 
             "right" -> {
-                startX = width * 0.20f
-                startY = centerY
-                endX = width * 0.80f
-                endY = centerY
+                return performHorizontalSwipe(left = false)
             }
-
-            else -> return false
         }
 
-        return performSwipe(startX, startY, endX, endY, 500)
+        return performSwipe(startX, startY, endX, endY)
+    }
+
+    private fun performHorizontalSwipe(left: Boolean): Boolean {
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+
+        val startY = height / 2f
+        val endY = height / 2f
+
+        val startX = if (left) width * 0.75f else width * 0.25f
+        val endX = if (left) width * 0.25f else width * 0.75f
+
+        return performSwipe(startX, startY, endX, endY)
     }
 
     private fun performSwipe(
         startX: Float,
         startY: Float,
         endX: Float,
-        endY: Float,
-        duration: Long
+        endY: Float
     ): Boolean {
-        val latch = CountDownLatch(1)
-        var success = false
-
-        mainHandler.post {
+        return try {
             val path = Path().apply {
                 moveTo(startX, startY)
                 lineTo(endX, endY)
             }
 
             val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 450))
                 .build()
+
+            val latch = CountDownLatch(1)
+            var success = false
 
             dispatchGesture(
                 gesture,
@@ -771,89 +1070,127 @@ class GhostAccessibilityService : AccessibilityService() {
                         latch.countDown()
                     }
                 },
-                null
+                mainHandler
             )
-        }
 
-        latch.await(4, TimeUnit.SECONDS)
-        return success
+            latch.await(3, TimeUnit.SECONDS)
+            success
+        } catch (e: Exception) {
+            Log.e(TAG, "performSwipe failed", e)
+            false
+        }
     }
 
-    private fun performType(text: String): Boolean {
+    private fun gridCellToPoint(
+        gridCell: String,
+        screenWidth: Int,
+        screenHeight: Int
+    ): Pair<Float, Float>? {
+        if (gridCell.length < 2) return null
+
+        val colChar = gridCell[0].uppercaseChar()
+        val rowText = gridCell.substring(1)
+
+        val colIndex = colChar - 'A'
+        val rowIndex = rowText.toIntOrNull()?.minus(1) ?: return null
+
+        if (colIndex !in 0..9 || rowIndex !in 0..9) return null
+
+        val cellWidth = screenWidth / 10f
+        val cellHeight = screenHeight / 10f
+
+        val x = colIndex * cellWidth + cellWidth / 2f
+        val y = rowIndex * cellHeight + cellHeight / 2f
+
+        return Pair(x, y)
+    }
+
+    private fun captureScreenJpegBytes(): ByteArray? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Log.e(TAG, "takeScreenshot requires Android 11+")
+            return null
+        }
+
         val latch = CountDownLatch(1)
-        var success = false
+        var resultBytes: ByteArray? = null
 
-        mainHandler.post {
-            try {
-                var targetNode = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        val executor = java.util.concurrent.Executor { runnable ->
+            mainHandler.post(runnable)
+        }
 
-                if (targetNode == null) {
-                    targetNode = findEditableNode(rootInActiveWindow)
+        try {
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                executor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        try {
+                            val hardwareBuffer = screenshot.hardwareBuffer
+                            val bitmap = Bitmap.wrapHardwareBuffer(
+                                hardwareBuffer,
+                                screenshot.colorSpace
+                            )?.copy(Bitmap.Config.ARGB_8888, false)
+
+                            hardwareBuffer.close()
+
+                            if (bitmap == null) {
+                                Log.e(TAG, "Bitmap from screenshot is null")
+                                latch.countDown()
+                                return
+                            }
+
+                            val resizedBitmap = resizeBitmapForVlm(bitmap, maxWidth = 540)
+                            val outputStream = ByteArrayOutputStream()
+
+                            resizedBitmap.compress(
+                                Bitmap.CompressFormat.JPEG,
+                                45,
+                                outputStream
+                            )
+
+                            resultBytes = outputStream.toByteArray()
+
+                            if (resizedBitmap != bitmap) {
+                                resizedBitmap.recycle()
+                            }
+
+                            bitmap.recycle()
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Screenshot onSuccess failed", e)
+                        } finally {
+                            latch.countDown()
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        Log.e(TAG, "takeScreenshot failed: $errorCode")
+                        latch.countDown()
+                    }
                 }
+            )
 
-                if (targetNode == null) {
-                    success = false
-                    latch.countDown()
-                    return@post
-                }
-
-                targetNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-                targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-
-                val args = Bundle()
-                args.putCharSequence(
-                    AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                    text
-                )
-
-                success = targetNode.performAction(
-                    AccessibilityNodeInfo.ACTION_SET_TEXT,
-                    args
-                )
-
-                targetNode.recycle()
-                latch.countDown()
-            } catch (e: Exception) {
-                Log.e("GhostService", "Typing failed", e)
-                success = false
-                latch.countDown()
-            }
+            latch.await(5, TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            Log.e(TAG, "captureScreenJpegBytes failed", e)
+            return null
         }
 
-        latch.await(3, TimeUnit.SECONDS)
-        return success
+        return resultBytes
     }
 
-    private fun findEditableNode(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-        if (root == null) return null
-
-        if (root.isEditable) {
-            return root
+    private fun resizeBitmapForVlm(bitmap: Bitmap, maxWidth: Int): Bitmap {
+        if (bitmap.width <= maxWidth) {
+            return bitmap
         }
 
-        for (i in 0 until root.childCount) {
-            val child = root.getChild(i) ?: continue
-            val result = findEditableNode(child)
+        val scale = maxWidth.toFloat() / max(1, bitmap.width).toFloat()
+        val newHeight = max(1, (bitmap.height * scale).toInt())
 
-            if (result != null) {
-                return result
-            }
-        }
-
-        return null
-    }
-
-    private fun showOverlayWithStatus(message: String) {
-        mainHandler.post {
-            overlayView?.visibility = View.VISIBLE
-            ghostButton?.text = "👻"
-            statusView?.text = message
-        }
-    }
-
-    private fun hideOverlayForScreenshot() {
-        mainHandler.post {
-            overlayView?.visibility = View.GONE
-        }
+        return Bitmap.createScaledBitmap(
+            bitmap,
+            maxWidth,
+            newHeight,
+            true
+        )
     }
 }

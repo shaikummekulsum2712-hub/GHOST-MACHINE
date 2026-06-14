@@ -1,12 +1,12 @@
 package com.example.ghostmachine
 
 import android.util.Log
-import java.io.BufferedReader
-import java.io.DataOutputStream
-import java.io.InputStreamReader
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.UUID
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
+import java.util.concurrent.TimeUnit
 
 object ApiClient {
 
@@ -15,88 +15,51 @@ object ApiClient {
     fun analyzeScreen(
         command: String,
         screenshotBytes: ByteArray,
-        screenElementsJson: String
+        screenElementsJson: String,
+        parsedIntent: String,
+        parsedTarget: String,
+        androidUncertainty: String,
+        previousAction: String?
     ): String? {
-        var connection: HttpURLConnection? = null
-
         return try {
-            val boundary = "----GhostMachineBoundary${UUID.randomUUID()}"
-            val lineEnd = "\r\n"
-            val twoHyphens = "--"
+            val client = OkHttpClient.Builder()
+                .connectTimeout(20, TimeUnit.SECONDS)
+                .readTimeout(180, TimeUnit.SECONDS)
+                .writeTimeout(60, TimeUnit.SECONDS)
+                .build()
 
-            val url = URL("$BASE_URL/analyze-screen")
-            connection = url.openConnection() as HttpURLConnection
+            val screenshotBody = screenshotBytes.toRequestBody("image/jpeg".toMediaType())
 
-            connection.requestMethod = "POST"
-            connection.doInput = true
-            connection.doOutput = true
-            connection.useCaches = false
-            connection.connectTimeout = 15000
-            connection.readTimeout = 70000
+            val multipartBodyBuilder = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("command", command)
+                .addFormDataPart("screen_elements_json", screenElementsJson)
+                .addFormDataPart("parsed_intent", parsedIntent)
+                .addFormDataPart("parsed_target", parsedTarget)
+                .addFormDataPart("android_uncertainty", androidUncertainty)
+                .addFormDataPart("screenshot", "screen.jpg", screenshotBody)
 
-            connection.setRequestProperty(
-                "Content-Type",
-                "multipart/form-data; boundary=$boundary"
-            )
-
-            val outputStream = DataOutputStream(connection.outputStream)
-
-            // command field
-            outputStream.writeBytes(twoHyphens + boundary + lineEnd)
-            outputStream.writeBytes("Content-Disposition: form-data; name=\"command\"$lineEnd")
-            outputStream.writeBytes(lineEnd)
-            outputStream.writeBytes(command)
-            outputStream.writeBytes(lineEnd)
-
-            // screen_elements_json field
-            outputStream.writeBytes(twoHyphens + boundary + lineEnd)
-            outputStream.writeBytes("Content-Disposition: form-data; name=\"screen_elements_json\"$lineEnd")
-            outputStream.writeBytes(lineEnd)
-            outputStream.writeBytes(screenElementsJson)
-            outputStream.writeBytes(lineEnd)
-
-            // screenshot file
-            outputStream.writeBytes(twoHyphens + boundary + lineEnd)
-            outputStream.writeBytes(
-                "Content-Disposition: form-data; name=\"screenshot\"; filename=\"screen.jpg\"$lineEnd"
-            )
-            outputStream.writeBytes("Content-Type: image/jpeg$lineEnd")
-            outputStream.writeBytes(lineEnd)
-            outputStream.write(screenshotBytes)
-            outputStream.writeBytes(lineEnd)
-
-            outputStream.writeBytes(twoHyphens + boundary + twoHyphens + lineEnd)
-            outputStream.flush()
-            outputStream.close()
-
-            val responseCode = connection.responseCode
-
-            val inputStream = if (responseCode in 200..299) {
-                connection.inputStream
-            } else {
-                connection.errorStream
+            if (!previousAction.isNullOrBlank()) {
+                multipartBodyBuilder.addFormDataPart("previous_action", previousAction)
             }
 
-            val reader = BufferedReader(InputStreamReader(inputStream))
-            val response = StringBuilder()
+            val request = Request.Builder()
+                .url("$BASE_URL/analyze-screen")
+                .post(multipartBodyBuilder.build())
+                .build()
 
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                response.append(line)
+            client.newCall(request).execute().use { response ->
+                val bodyText = response.body?.string()
+                if (!response.isSuccessful) {
+                    Log.e("ApiClient", "Backend error: ${response.code} $bodyText")
+                    return null
+                }
+                bodyText
             }
-
-            reader.close()
-
-            Log.i("ApiClient", "Backend response code: $responseCode")
-            Log.i("ApiClient", "Backend response: $response")
-
-            if (responseCode in 200..299) response.toString() else null
-
         } catch (e: Exception) {
-            Log.e("ApiClient", "Failed to call /analyze-screen", e)
+            Log.e("ApiClient", "analyzeScreen failed", e)
             null
-        } finally {
-            connection?.disconnect()
         }
     }
+
 }

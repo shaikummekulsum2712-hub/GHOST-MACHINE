@@ -76,90 +76,69 @@ def next_action(request: CommandRequest):
     return agent_get_next_action(request.command)
 
 
-@app.post("/analyze-screen", response_model=ActionResponse)
+@app.post("/analyze-screen")
 async def analyze_screen(
     command: str = Form(...),
     screenshot: UploadFile = File(...),
-    screen_elements_json: str | None = Form(None)
+    screen_elements_json: str | None = Form(None),
+    parsed_intent: str | None = Form(None),
+    parsed_target: str | None = Form(None),
+    android_uncertainty: str | None = Form(None),
+    previous_action: str | None = Form(None)
 ):
-    print("Command received:", command)
-    print("Screenshot filename:", screenshot.filename)
+    global latest_status
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    screenshot_filename = f"screenshot_{timestamp}.jpg"
-    screenshot_path = UPLOAD_DIR / screenshot_filename
+    suffix = Path(screenshot.filename or "screen.jpg").suffix or ".jpg"
+    filename = f"screenshot_{timestamp}{suffix}"
+    screenshot_path = UPLOAD_DIR / filename
 
-    image_bytes = await screenshot.read()
-
-    with open(screenshot_path, "wb") as f:
-        f.write(image_bytes)
+    contents = await screenshot.read()
+    screenshot_path.write_bytes(contents)
 
     elements_count = 0
-
     if screen_elements_json:
         try:
             elements_count = len(json.loads(screen_elements_json))
         except Exception:
             elements_count = 0
 
+    print("Command received:", command)
+    print("Screenshot filename:", screenshot.filename)
     print("Screenshot saved at:", screenshot_path)
     print("Screen elements count:", elements_count)
+    print("Parsed intent:", parsed_intent)
+    print("Parsed target:", parsed_target)
+    print("Android uncertainty:", android_uncertainty)
 
-    update_status(
-        status="analyzing_with_vlm",
+    action = agent_get_next_action(
         command=command,
-        screenshot_file=screenshot_filename,
-        screenshot_url=f"/uploads/{screenshot_filename}",
-        elements_count=elements_count,
-        action=None,
-        element_id=None,
-        target_text=None,
-        target_description=None,
-        reason=None,
-        confidence=None,
-        error=None,
+        screenshot_path=str(screenshot_path),
+        screen_elements_json=screen_elements_json,
+        parsed_intent=parsed_intent,
+        parsed_target=parsed_target,
+        android_uncertainty=android_uncertainty,
+        previous_action=previous_action
     )
 
-    try:
-        action = agent_get_next_action(
-            command=command,
-            screenshot_path=str(screenshot_path),
-            screen_elements_json=screen_elements_json
-        )
+    latest_status = {
+        "command": command,
+        "screenshot_url": f"/uploads/{filename}",
+        "elements_count": elements_count,
+        "parsed_intent": parsed_intent,
+        "parsed_target": parsed_target,
+        "android_uncertainty": android_uncertainty,
+        "action": action.action,
+        "element_id": action.element_id,
+        "grid_cell": action.grid_cell,
+        "x": action.x,
+        "y": action.y,
+        "text": action.text,
+        "direction": action.direction,
+        "target_text": action.target_text,
+        "target_description": action.target_description,
+        "reason": action.reason,
+        "confidence": action.confidence,
+    }
 
-        update_status(
-            status="action_generated",
-            action=action.action,
-            element_id=action.element_id,
-            target_text=action.target_text,
-            target_description=action.target_description,
-            reason=action.reason,
-            confidence=action.confidence,
-            error=None,
-        )
-
-        return action
-
-    except Exception as e:
-        print("Analyze screen failed:", e)
-
-        update_status(
-            status="failed",
-            error=str(e),
-            action="ask_user",
-            reason="Backend failed while analyzing screen.",
-            confidence=1.0,
-        )
-
-        return ActionResponse(
-            action="ask_user",
-            x=None,
-            y=None,
-            text=None,
-            direction=None,
-            element_id=None,
-            target_text=None,
-            target_description=None,
-            reason="Backend failed while analyzing screen.",
-            confidence=1.0
-        )
+    return action
