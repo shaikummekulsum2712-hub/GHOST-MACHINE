@@ -9,7 +9,8 @@ def get_next_action(
     parsed_intent: str | None = None,
     parsed_target: str | None = None,
     android_uncertainty: str | None = None,
-    previous_action: str | None = None
+    previous_action: str | None = None,
+    reply_language: str | None = None
 ) -> ActionResponse:
     if not screenshot_path:
         return ActionResponse(
@@ -23,6 +24,7 @@ def get_next_action(
             target_text=None,
             target_description=None,
             reason="Screenshot required.",
+            user_message="I need a screenshot to continue.",
             confidence=1.0
         )
 
@@ -33,5 +35,6 @@ def get_next_action(
         parsed_intent=parsed_intent,
         parsed_target=parsed_target,
         android_uncertainty=android_uncertainty,
-        previous_action=previous_action
+        previous_action=previous_action,
+        reply_language=reply_language
     )

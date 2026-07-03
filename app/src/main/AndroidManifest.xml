@@ -7,6 +7,21 @@
     <queries>
         <package android:name="com.whatsapp" />
         <package android:name="com.whatsapp.w4b" />
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.android.chrome" />
+        <package android:name="com.google.android.googlequicksearchbox" />
+
+        <!-- Required on API 30+ so SpeechRecognizer.isRecognitionAvailable()
+             can actually see the on-device recognition service. Without this,
+             it can silently return false on some devices/OEMs. -->
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+
+        <!-- Required so TextToSpeech can reliably discover installed engines. -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <application

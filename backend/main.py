@@ -63,7 +63,14 @@ def status():
 
 @app.get("/uploads/{filename}")
 def get_uploaded_file(filename: str):
-    file_path = UPLOAD_DIR / filename
+    # Reject path traversal attempts / nested paths - only allow a bare filename
+    if "/" in filename or "\\" in filename or filename in (".", ".."):
+        return {"error": "invalid filename"}
+
+    file_path = (UPLOAD_DIR / filename).resolve()
+
+    if UPLOAD_DIR.resolve() not in file_path.parents:
+        return {"error": "invalid filename"}
 
     if not file_path.exists():
         return {"error": "file not found"}
@@ -84,10 +91,9 @@ async def analyze_screen(
     parsed_intent: str | None = Form(None),
     parsed_target: str | None = Form(None),
     android_uncertainty: str | None = Form(None),
-    previous_action: str | None = Form(None)
+    previous_action: str | None = Form(None),
+    reply_language: str | None = Form(None)
 ):
-    global latest_status
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = Path(screenshot.filename or "screen.jpg").suffix or ".jpg"
     filename = f"screenshot_{timestamp}{suffix}"
@@ -111,34 +117,54 @@ async def analyze_screen(
     print("Parsed target:", parsed_target)
     print("Android uncertainty:", android_uncertainty)
 
-    action = agent_get_next_action(
+    try:
+        action = agent_get_next_action(
+            command=command,
+            screenshot_path=str(screenshot_path),
+            screen_elements_json=screen_elements_json,
+            parsed_intent=parsed_intent,
+            parsed_target=parsed_target,
+            android_uncertainty=android_uncertainty,
+            previous_action=previous_action,
+            reply_language=reply_language
+        )
+    except Exception as e:
+        update_status(
+            status="error",
+            command=command,
+            screenshot_file=filename,
+            screenshot_url=f"/uploads/{filename}",
+            elements_count=elements_count,
+            parsed_intent=parsed_intent,
+            parsed_target=parsed_target,
+            android_uncertainty=android_uncertainty,
+            error=str(e),
+        )
+        raise
+
+    update_status(
+        status="success",
         command=command,
-        screenshot_path=str(screenshot_path),
-        screen_elements_json=screen_elements_json,
+        screenshot_file=filename,
+        screenshot_url=f"/uploads/{filename}",
+        elements_count=elements_count,
         parsed_intent=parsed_intent,
         parsed_target=parsed_target,
         android_uncertainty=android_uncertainty,
-        previous_action=previous_action
+        action=action.action,
+        element_id=action.element_id,
+        grid_cell=action.grid_cell,
+        x=action.x,
+        y=action.y,
+        text=action.text,
+        direction=action.direction,
+        target_text=action.target_text,
+        target_description=action.target_description,
+        reason=action.reason,
+        confidence=action.confidence,
+        reply_language=reply_language,
+        user_message=action.user_message,
+        error=None,
     )
-
-    latest_status = {
-        "command": command,
-        "screenshot_url": f"/uploads/{filename}",
-        "elements_count": elements_count,
-        "parsed_intent": parsed_intent,
-        "parsed_target": parsed_target,
-        "android_uncertainty": android_uncertainty,
-        "action": action.action,
-        "element_id": action.element_id,
-        "grid_cell": action.grid_cell,
-        "x": action.x,
-        "y": action.y,
-        "text": action.text,
-        "direction": action.direction,
-        "target_text": action.target_text,
-        "target_description": action.target_description,
-        "reason": action.reason,
-        "confidence": action.confidence,
-    }
 
     return action

@@ -77,6 +77,7 @@ def build_action_response_from_text(model_text: str) -> ActionResponse:
     action_dict.setdefault("target_text", None)
     action_dict.setdefault("target_description", None)
     action_dict.setdefault("reason", "No reason provided.")
+    action_dict.setdefault("user_message", None)
     action_dict.setdefault("confidence", 0.8)
 
     return ActionResponse(**action_dict)
@@ -94,6 +95,7 @@ def fallback_response(reason: str) -> ActionResponse:
         target_text=None,
         target_description=None,
         reason=reason,
+        user_message="Something went wrong. Please try again.",
         confidence=1.0
     )
 
@@ -105,7 +107,8 @@ def call_vision_model(
     parsed_intent: str | None = None,
     parsed_target: str | None = None,
     android_uncertainty: str | None = None,
-    previous_action: str | None = None
+    previous_action: str | None = None,
+    reply_language: str | None = None
 ) -> ActionResponse:
     prompt = build_vision_prompt(
         command=command,
@@ -118,7 +121,7 @@ def call_vision_model(
 
     image_base64 = encode_image_to_base64(screenshot_path)
 
-    url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+    url = f"{OLLAMA_BASE_URL.strip('/')}/api/chat"
 
     payload = {
         "model": OLLAMA_MODEL,
@@ -135,7 +138,8 @@ def call_vision_model(
         "options": {
             "temperature": 0,
             "num_predict": 80,
-            "num_ctx": 2048,
+            "num_ctx": 3072,
+            "stop" : ["Wait"],
             "top_k": 1,
             "top_p": 0.1
         }

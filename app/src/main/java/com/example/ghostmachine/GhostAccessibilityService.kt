@@ -50,6 +50,8 @@ class GhostAccessibilityService : AccessibilityService() {
     private var overlayView: LinearLayout? = null
     private var ghostButton: Button? = null
     private var statusView: TextView? = null
+    private var ghostTts: GhostTts? = null
+    private var currentReplyLanguage: String = "english"
 
     private var speechRecognizer: SpeechRecognizer? = null
 
@@ -88,6 +90,9 @@ class GhostAccessibilityService : AccessibilityService() {
         Log.d(TAG, "Accessibility service connected")
         createOverlay()
         initSpeechRecognizer()
+
+        ghostTts = GhostTts(this)
+        ghostTts?.init()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -107,6 +112,11 @@ class GhostAccessibilityService : AccessibilityService() {
         }
 
         try {
+            ghostTts?.shutdown()
+        } catch (_: Exception) {
+        }
+
+        try {
             overlayView?.let { windowManager?.removeView(it) }
         } catch (_: Exception) {
         }
@@ -114,6 +124,7 @@ class GhostAccessibilityService : AccessibilityService() {
         overlayView = null
         ghostButton = null
         statusView = null
+        ghostTts = null
     }
 
     private fun createOverlay() {
@@ -211,7 +222,12 @@ class GhostAccessibilityService : AccessibilityService() {
 
         speechRecognizer?.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
-                setOverlayStatus("Listening...")
+                setOverlayStatus(
+                    VoiceLanguageManager.message(
+                        key = "listening",
+                        language = currentReplyLanguage
+                    )
+                )
             }
 
             override fun onBeginningOfSpeech() {
@@ -223,7 +239,12 @@ class GhostAccessibilityService : AccessibilityService() {
             override fun onBufferReceived(buffer: ByteArray?) {}
 
             override fun onEndOfSpeech() {
-                setOverlayStatus("Processing voice...")
+                setOverlayStatus(
+                    VoiceLanguageManager.message(
+                        key = "processing_voice",
+                        language = currentReplyLanguage
+                    )
+                )
             }
 
             override fun onError(error: Int) {
@@ -289,17 +310,64 @@ class GhostAccessibilityService : AccessibilityService() {
     }
 
     private fun runCommandFromOverlay(command: String) {
-        showToast("Ghost heard: $command")
-        setOverlayStatus("Heard: $command")
+        if (!isRunning.compareAndSet(false, true)) {
+            setOverlayStatus("Busy, please wait...")
+            return
+        }
 
-        if (handleDirectOpenCommand(command)) {
-            mainHandler.postDelayed({ showButtonAgain() }, 900)
+        val voiceContext = VoiceLanguageManager.buildContext(command)
+        currentReplyLanguage = voiceContext.replyLanguage
+
+        val understoodMessage = VoiceLanguageManager.message(
+            key = "understood",
+            language = currentReplyLanguage,
+            extra = voiceContext.originalCommand
+        )
+
+        showToast(understoodMessage)
+        setOverlayStatus(understoodMessage)
+        ghostTts?.speak(understoodMessage, currentReplyLanguage)
+
+        if (handleDirectOpenCommand(voiceContext.normalizedCommand)) {
+            mainHandler.postDelayed({
+                showButtonAgain()
+                isRunning.set(false)
+            }, 900)
             return
         }
 
         Thread {
-            runVisionLoop(command)
+            try {
+                Log.d(TAG, "Vision loop started")
+                runVisionLoopWithVoiceContext(voiceContext)
+                Log.d(TAG, "Vision loop finished")
+            } catch (e: Exception) {
+                Log.e(TAG, "Vision loop crashed", e)
+                mainHandler.post {
+                    val msg = VoiceLanguageManager.message("error", currentReplyLanguage)
+                    setOverlayStatus(msg)
+                    ghostTts?.speak(msg, currentReplyLanguage)
+                    showButtonAgain()
+                }
+            } finally {
+                isRunning.set(false)
+            }
         }.start()
+    }
+
+
+    private fun runVisionLoopWithVoiceContext(
+        voiceContext: VoiceLanguageManager.VoiceCommandContext
+    ) {
+        val parsedCommand = ParsedCommand(
+            intent = voiceContext.parsedIntent,
+            target = voiceContext.parsedTarget
+        )
+        runVisionLoop(
+            command = voiceContext.normalizedCommand,
+            parsed = parsedCommand,
+            replyLanguage = voiceContext.replyLanguage
+        )
     }
 
     private fun handleDirectOpenCommand(command: String): Boolean {
@@ -393,111 +461,177 @@ class GhostAccessibilityService : AccessibilityService() {
             else -> ParsedCommand("unknown", command)
         }
     }
+    private fun runVisionLoop(
+        command: String,
+        parsed: ParsedCommand,
+        replyLanguage: String
+    ) {
 
-    private fun runVisionLoop(command: String) {
-        if (!isRunning.compareAndSet(false, true)) {
-            showOverlayWithStatus("Already running")
-            return
-        }
+        Log.d(TAG, "==============================")
+        Log.d(TAG, "NEW COMMAND")
+        Log.d(TAG, "Command = $command")
+        Log.d(TAG, "Intent = ${parsed.intent}")
+        Log.d(TAG, "Target = ${parsed.target}")
+        Log.d(TAG, "==============================")
 
-        val parsed = parseCommand(command)
+        val maxSteps = 6
+
         var previousAction: String? = null
-        val maxSteps = 2
 
-        try {
-            for (step in 1..maxSteps) {
-                showOverlayWithStatus("Checking screen...")
+        for (step in 1..maxSteps) {
 
-                val elements = collectScreenElements()
+            Log.d(TAG, "")
+            Log.d(TAG, "===== STEP $step =====")
 
-                if (isTaskDone(parsed, elements, previousAction)) {
-                    showOverlayWithStatus("Done")
-                    Thread.sleep(700)
-                    break
+            mainHandler.post {
+                val msg = VoiceLanguageManager.message(
+                    "checking",
+                    replyLanguage
+                )
+                setOverlayStatus(msg)
+            }
+
+            Log.d(TAG, "Collecting UI elements")
+
+            val elements = collectScreenElements()
+
+            Log.d(TAG, "Collected ${elements.size} elements")
+
+            Log.d(TAG, "Checking if task already completed")
+
+            val done = isTaskDone(parsed, elements, previousAction)
+
+            Log.d(TAG, "Task completed = $done")
+
+            if (done) {
+
+                mainHandler.post {
+                    val msg = VoiceLanguageManager.message(
+                        "done",
+                        replyLanguage
+                    )
+                    setOverlayStatus(msg)
+                    ghostTts?.speak(msg, replyLanguage)
+                    showButtonAgain()
                 }
 
-                val androidDecision = decideWithAndroidOnly(parsed, elements)
+                Log.d(TAG, "Task finished successfully")
 
-                if (androidDecision.confident) {
-                    showOverlayWithStatus("Doing it...")
+                return
+            }
 
-                    val success = executeAndroidDecision(androidDecision)
+            Log.d(TAG, "Running Android decision engine")
+
+            val androidDecision = decideWithAndroidOnly(parsed, elements)
+
+            Log.d(TAG, "Decision:")
+            Log.d(TAG, "Action = ${androidDecision.action}")
+            Log.d(TAG, "Confident = ${androidDecision.confident}")
+            Log.d(TAG, "Confidence = ${androidDecision.confidence}")
+            Log.d(TAG, "Reason = ${androidDecision.reason}")
+
+            if (androidDecision.confident) {
+
+                Log.d(TAG, "Executing Android action")
+
+                val executed = executeAndroidDecision(androidDecision)
+
+                Log.d(TAG, "Android executed = $executed")
+
+                if (executed) {
+
                     previousAction = androidDecision.action
 
-                    if (!success) {
-                        showOverlayWithStatus("I could not do that.")
-                        Thread.sleep(900)
-                        break
-                    }
-
-                    Thread.sleep(800)
-
-                    val newElements = collectScreenElements()
-                    if (isTaskDone(parsed, newElements, previousAction)) {
-                        showOverlayWithStatus("Done")
-                        Thread.sleep(700)
-                        break
-                    }
+                    Thread.sleep(700)
 
                     continue
                 }
 
-                showOverlayWithStatus("Thinking...")
-                Thread.sleep(300)
+                Log.d(TAG, "Android execution failed. Falling back to LLM")
+            }
 
-                hideOverlayForScreenshot()
-                Thread.sleep(300)
+            Log.d(TAG, "Capturing screenshot")
 
-                val screenshotBytes = captureScreenJpegBytes()
+            hideOverlayForScreenshot()
+            val screenshotBytes = captureScreenJpegBytes()
+            mainHandler.post { overlayView?.visibility = View.VISIBLE }
 
-                showOverlayWithStatus("Thinking...")
+            if (screenshotBytes == null) {
+                Log.e(TAG, "Screenshot capture failed")
+                break
+            }
 
-                if (screenshotBytes == null) {
-                    showOverlayWithStatus("Could not capture screen.")
-                    Thread.sleep(900)
-                    break
-                }
+            Log.d(TAG, "Screenshot size = ${screenshotBytes.size} bytes")
 
-                val compactElementsJson = elementsToJson(elements, parsed)
+            mainHandler.post {
 
-                val responseJson = ApiClient.analyzeScreen(
-                    command = command,
-                    screenshotBytes = screenshotBytes,
-                    screenElementsJson = compactElementsJson,
-                    parsedIntent = parsed.intent,
-                    parsedTarget = parsed.target,
-                    androidUncertainty = androidDecision.reason,
-                    previousAction = previousAction
+                val msg = VoiceLanguageManager.message(
+                    "thinking",
+                    replyLanguage
                 )
 
-                if (responseJson == null) {
-                    showOverlayWithStatus("Something went wrong.")
-                    Thread.sleep(900)
-                    break
-                }
-
-                showOverlayWithStatus("Executing...")
-
-                val success = executeVlmAction(responseJson, elements)
-                previousAction = responseJson
-
-                if (!success) {
-                    showOverlayWithStatus("I could not complete this.")
-                    Thread.sleep(900)
-                    break
-                }
-
-                Thread.sleep(900)
+                setOverlayStatus(msg)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "runVisionLoop failed", e)
-            showOverlayWithStatus("Something went wrong.")
-            Thread.sleep(900)
-        } finally {
-            isRunning.set(false)
+
+            Log.d(TAG, "Calling backend...")
+
+            val result = ApiClient.analyzeScreen(
+                command, screenshotBytes, elementsToJson(elements, parsed),
+                parsed.intent, parsed.target, androidDecision.reason,
+                previousAction, replyLanguage
+            )
+
+            when (result) {
+                is ApiClient.AnalyzeResult.NetworkError -> {
+                    Log.e(TAG, "Network error: ${result.message}")
+                    mainHandler.post {
+                        setOverlayStatus("Backend unreachable")
+                        ghostTts?.speak(
+                            VoiceLanguageManager.message("error", replyLanguage),
+                            replyLanguage
+                        )
+                        showButtonAgain()
+                    }
+                    return
+                }
+
+                is ApiClient.AnalyzeResult.ServerError -> {
+                    Log.e(TAG, "Server error ${result.code}: ${result.body}")
+                    break
+                }
+
+                is ApiClient.AnalyzeResult.Success -> {
+                    Log.d(TAG, "Executing backend action")
+                    val executed = executeVlmAction(result.json, elements)
+                    Log.d(TAG, "Backend executed = $executed")
+
+                    if (!executed) {
+                        Log.e(TAG, "Backend action failed")
+                        break
+                    }
+
+                    previousAction = "backend"
+                    Thread.sleep(700)
+                }
+            }
+
+        Log.e(TAG, "Vision loop exited after reaching max steps or failure")
+
+        mainHandler.post {
+
+            val msg = VoiceLanguageManager.message(
+                "error",
+                replyLanguage
+            )
+
+            setOverlayStatus(msg)
+
+            ghostTts?.speak(msg, replyLanguage)
+
             showButtonAgain()
         }
     }
+
 
     private fun decideWithAndroidOnly(
         parsed: ParsedCommand,
@@ -523,6 +657,7 @@ class GhostAccessibilityService : AccessibilityService() {
             if (editable != null || isAnyInputFocused()) {
                 return AndroidDecision(true, "type", editable, parsed.target, null, "input ready", 0.95)
             }
+            return AndroidDecision(false, "none", null, null, null, "no editable field found for type", 0.3)
         }
 
         if (intent == "search") {
@@ -640,37 +775,74 @@ class GhostAccessibilityService : AccessibilityService() {
     }
 
     private fun executeAndroidDecision(decision: AndroidDecision): Boolean {
-        return when (decision.action) {
-            "back" -> performGlobalAction(GLOBAL_ACTION_BACK)
 
-            "home" -> performGlobalAction(GLOBAL_ACTION_HOME)
+        Log.d(TAG,"Executing Android Action")
+        Log.d(TAG,"Action = ${decision.action}")
 
-            "swipe" -> {
+        return when(decision.action){
+
+            "back"->{
+                Log.d(TAG,"GLOBAL BACK")
+                performGlobalAction(GLOBAL_ACTION_BACK)
+            }
+
+            "home"->{
+                Log.d(TAG,"GLOBAL HOME")
+                performGlobalAction(GLOBAL_ACTION_HOME)
+            }
+
+            "swipe"->{
+                Log.d(TAG,"Swipe ${decision.direction}")
                 performDirectionalSwipe(decision.direction ?: "down")
             }
 
-            "type" -> {
-                val text = decision.text ?: return false
+            "type"->{
+
+                val text=decision.text ?: return false
+
+                Log.d(TAG,"Typing = $text")
+
                 performType(text)
             }
 
-            "tap" -> {
-                val element = decision.element ?: return false
-                performTap(element.centerX(), element.centerY())
+            "tap"->{
+
+                val element=decision.element ?: return false
+
+                Log.d(TAG,"Tap (${element.centerX()},${element.centerY()})")
+
+                performTap(
+                    element.centerX(),
+                    element.centerY()
+                )
             }
 
-            "tap_then_type" -> {
-                val element = decision.element ?: return false
-                val text = decision.text ?: return false
+            "tap_then_type"->{
 
-                val tapped = performTap(element.centerX(), element.centerY())
-                if (!tapped) return false
+                val element=decision.element ?: return false
+                val text=decision.text ?: return false
+
+                Log.d(TAG,"Tap then type")
+
+                val tapped=performTap(
+                    element.centerX(),
+                    element.centerY()
+                )
+
+                Log.d(TAG,"Tapped = $tapped")
+
+                if(!tapped)
+                    return false
 
                 Thread.sleep(700)
+
                 performType(text)
             }
 
-            else -> false
+            else->{
+                Log.d(TAG,"Unknown Android action")
+                false
+            }
         }
     }
 
@@ -684,6 +856,7 @@ class GhostAccessibilityService : AccessibilityService() {
             val text = if (obj.isNull("text")) null else obj.optString("text")
             val direction = if (obj.isNull("direction")) null else obj.optString("direction")
             val reason = obj.optString("reason", "")
+            val userMessage = if (obj.isNull("user_message")) null else obj.optString("user_message")
 
             when (action) {
                 "done" -> {
@@ -692,7 +865,15 @@ class GhostAccessibilityService : AccessibilityService() {
                 }
 
                 "ask_user" -> {
-                    showOverlayWithStatus(reason.ifBlank { "I need help." })
+                    val message = userMessage
+                        ?: VoiceLanguageManager.message(
+                            key = "need_help",
+                            language = currentReplyLanguage,
+                            extra = reason
+                        )
+
+                    showOverlayWithStatus(message)
+                    ghostTts?.speak(message, currentReplyLanguage)
                     false
                 }
 
@@ -1169,7 +1350,13 @@ class GhostAccessibilityService : AccessibilityService() {
                 }
             )
 
-            latch.await(5, TimeUnit.SECONDS)
+
+            val completed = latch.await(5, TimeUnit.SECONDS)
+
+            if (!completed) {
+                Log.e(TAG, "Screenshot timed out")
+                return null
+            }
         } catch (e: Exception) {
             Log.e(TAG, "captureScreenJpegBytes failed", e)
             return null

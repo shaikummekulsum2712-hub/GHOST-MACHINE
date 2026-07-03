@@ -4,9 +4,11 @@ def build_vision_prompt(
     parsed_intent: str | None = None,
     parsed_target: str | None = None,
     android_uncertainty: str | None = None,
-    previous_action: str | None = None
+    previous_action: str | None = None,
+    reply_language: str | None = None
 ) -> str:
     elements_text = screen_elements_json or "[]"
+    language = reply_language or "english"
 
     return f"""
 /no_think
@@ -21,6 +23,9 @@ Parsed intent:
 
 Parsed target:
 {parsed_target or "unknown"}
+
+Reply language:
+{language}
 
 Android uncertainty:
 {android_uncertainty or "Android could not confidently choose an element."}
@@ -54,10 +59,12 @@ Rules:
 4. Return only ONE action.
 5. For entering text, use action "type".
 6. For risky actions like send, pay, delete, confirm, submit, use ask_user.
-7. Return done only if the user goal is already achieved.
-8. reason must be less than 8 words.
-9. Return valid raw JSON only.
-10. No markdown. No explanation.
+7. If action is ask_user, user_message must be in the reply language.
+8. If reply_language is hinglish, user_message should be casual Hinglish.
+9. If reply_language is telugu, user_message should be simple roman Telugu.
+10. reason must be less than 8 words.
+11. Return valid raw JSON only.
+12. No markdown. No explanation.
 
 JSON format:
 {{
@@ -71,6 +78,7 @@ JSON format:
   "target_text": string|null,
   "target_description": string|null,
   "reason": "short reason",
+  "user_message": string|null,
   "confidence": number
 }}
 """
