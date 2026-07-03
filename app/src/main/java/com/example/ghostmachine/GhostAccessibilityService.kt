@@ -48,6 +48,7 @@ class GhostAccessibilityService : AccessibilityService() {
 
     private var windowManager: WindowManager? = null
     private var overlayView: LinearLayout? = null
+
     private var ghostButton: Button? = null
     private var statusView: TextView? = null
     private var ghostTts: GhostTts? = null

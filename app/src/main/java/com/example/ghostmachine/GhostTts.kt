@@ -61,6 +61,7 @@ class GhostTts(private val context: Context) {
         }
     }
 
+
     fun shutdown() {
         try {
             tts?.stop()

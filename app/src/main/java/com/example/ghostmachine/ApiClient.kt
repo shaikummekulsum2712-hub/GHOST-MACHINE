@@ -69,6 +69,7 @@ object ApiClient {
         } catch (e: Exception) {
             Log.e(TAG, "analyzeScreen failed", e)
             null
+
         }
     }
 }

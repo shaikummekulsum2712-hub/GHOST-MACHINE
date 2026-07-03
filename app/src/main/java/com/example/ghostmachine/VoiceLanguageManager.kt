@@ -210,6 +210,7 @@ object VoiceLanguageManager {
 
     private fun englishMessage(key: String, extra: String): String {
         return when (key) {
+
             "listening" -> "Listening..."
             "processing_voice" -> "Processing voice..."
             "understood" -> "Understood: $extra"

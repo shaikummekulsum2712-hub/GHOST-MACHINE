@@ -31,6 +31,7 @@ def get_next_action(
     return call_vision_model(
         command=command,
         screenshot_path=screenshot_path,
+
         screen_elements_json=screen_elements_json,
         parsed_intent=parsed_intent,
         parsed_target=parsed_target,
