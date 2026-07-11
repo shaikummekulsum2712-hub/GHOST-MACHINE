@@ -1,102 +1,82 @@
 package com.example.ghostmachine
 
 import android.util.Log
-import java.io.BufferedReader
-import java.io.DataOutputStream
-import java.io.InputStreamReader
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.UUID
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.util.concurrent.TimeUnit
 
 object ApiClient {
 
-    private const val BASE_URL = "http://127.0.0.1:8000"
+    private const val TAG = "ApiClient"
+
+    // Phone -> laptop, over wifi. Must be the laptop's LAN IP, not 127.0.0.1.
+    // Backend must be started with --host 0.0.0.0.
+    private const val BASE_URL = "http://192.168.1.6:8000"
+
+    sealed class AnalyzeResult {
+        data class Success(val json: String) : AnalyzeResult()
+        data class ServerError(val code: Int, val body: String?) : AnalyzeResult()
+        data class NetworkError(val message: String) : AnalyzeResult()
+    }
+
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .build()
 
     fun analyzeScreen(
         command: String,
         screenshotBytes: ByteArray,
-        screenElementsJson: String
-    ): String? {
-        var connection: HttpURLConnection? = null
-
+        screenElementsJson: String,
+        parsedIntent: String,
+        parsedTarget: String,
+        androidUncertainty: String,
+        previousAction: String?,
+        replyLanguage: String
+    ): AnalyzeResult {
         return try {
-            val boundary = "----GhostMachineBoundary${UUID.randomUUID()}"
-            val lineEnd = "\r\n"
-            val twoHyphens = "--"
+            val screenshotBody = screenshotBytes.toRequestBody("image/jpeg".toMediaType())
 
-            val url = URL("$BASE_URL/analyze-screen")
-            connection = url.openConnection() as HttpURLConnection
+            val bodyBuilder = MultipartBody.Builder()
+                .setType(MultipartBody.FORM)
+                .addFormDataPart("command", command)
+                .addFormDataPart("screen_elements_json", screenElementsJson)
+                .addFormDataPart("parsed_intent", parsedIntent)
+                .addFormDataPart("parsed_target", parsedTarget)
+                .addFormDataPart("android_uncertainty", androidUncertainty)
+                .addFormDataPart("reply_language", replyLanguage)
+                .addFormDataPart("screenshot", "screen.jpg", screenshotBody)
 
-            connection.requestMethod = "POST"
-            connection.doInput = true
-            connection.doOutput = true
-            connection.useCaches = false
-            connection.connectTimeout = 15000
-            connection.readTimeout = 70000
-
-            connection.setRequestProperty(
-                "Content-Type",
-                "multipart/form-data; boundary=$boundary"
-            )
-
-            val outputStream = DataOutputStream(connection.outputStream)
-
-            // command field
-            outputStream.writeBytes(twoHyphens + boundary + lineEnd)
-            outputStream.writeBytes("Content-Disposition: form-data; name=\"command\"$lineEnd")
-            outputStream.writeBytes(lineEnd)
-            outputStream.writeBytes(command)
-            outputStream.writeBytes(lineEnd)
-
-            // screen_elements_json field
-            outputStream.writeBytes(twoHyphens + boundary + lineEnd)
-            outputStream.writeBytes("Content-Disposition: form-data; name=\"screen_elements_json\"$lineEnd")
-            outputStream.writeBytes(lineEnd)
-            outputStream.writeBytes(screenElementsJson)
-            outputStream.writeBytes(lineEnd)
-
-            // screenshot file
-            outputStream.writeBytes(twoHyphens + boundary + lineEnd)
-            outputStream.writeBytes(
-                "Content-Disposition: form-data; name=\"screenshot\"; filename=\"screen.jpg\"$lineEnd"
-            )
-            outputStream.writeBytes("Content-Type: image/jpeg$lineEnd")
-            outputStream.writeBytes(lineEnd)
-            outputStream.write(screenshotBytes)
-            outputStream.writeBytes(lineEnd)
-
-            outputStream.writeBytes(twoHyphens + boundary + twoHyphens + lineEnd)
-            outputStream.flush()
-            outputStream.close()
-
-            val responseCode = connection.responseCode
-
-            val inputStream = if (responseCode in 200..299) {
-                connection.inputStream
-            } else {
-                connection.errorStream
+            if (!previousAction.isNullOrBlank()) {
+                bodyBuilder.addFormDataPart("previous_action", previousAction)
             }
 
-            val reader = BufferedReader(InputStreamReader(inputStream))
-            val response = StringBuilder()
+            val request = Request.Builder()
+                .url("$BASE_URL/analyze-screen")
+                .post(bodyBuilder.build())
+                .build()
 
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                response.append(line)
+            client.newCall(request).execute().use { response ->
+                val bodyText = response.body?.string()
+                when {
+                    !response.isSuccessful -> {
+                        Log.e(TAG, "Backend error: ${response.code} $bodyText")
+                        AnalyzeResult.ServerError(response.code, bodyText)
+                    }
+                    bodyText.isNullOrBlank() -> {
+                        Log.e(TAG, "Backend returned empty body")
+                        AnalyzeResult.ServerError(response.code, "empty body")
+                    }
+                    else -> AnalyzeResult.Success(bodyText)
+                }
             }
-
-            reader.close()
-
-            Log.i("ApiClient", "Backend response code: $responseCode")
-            Log.i("ApiClient", "Backend response: $response")
-
-            if (responseCode in 200..299) response.toString() else null
-
         } catch (e: Exception) {
-            Log.e("ApiClient", "Failed to call /analyze-screen", e)
-            null
-        } finally {
-            connection?.disconnect()
+            Log.e(TAG, "analyzeScreen failed", e)
+            AnalyzeResult.NetworkError(e.message ?: "unknown network error")
         }
     }
 }
