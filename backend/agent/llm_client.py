@@ -101,7 +101,6 @@ def fallback_response(reason: str) -> ActionResponse:
         confidence=1.0
     )
 
-
 def call_vision_model(
     command: str,
     screenshot_path: str,
@@ -118,53 +117,56 @@ def call_vision_model(
         parsed_intent=parsed_intent,
         parsed_target=parsed_target,
         android_uncertainty=android_uncertainty,
-        previous_action=previous_action
+        previous_action=previous_action,
+        reply_language=reply_language
     )
 
     image_base64 = encode_image_to_base64(screenshot_path)
-
     url = f"{OLLAMA_BASE_URL.strip('/')}/api/chat"
 
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-                "images": [image_base64]
+    def make_payload(extra_nudge: str = "") -> dict:
+        final_prompt = prompt if not extra_nudge else prompt + "\n\n" + extra_nudge
+        return {
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {"role": "user", "content": final_prompt, "images": [image_base64]}
+            ],
+            "stream": False,
+            "format": "json",
+            "keep_alive": "30m",
+            "options": {
+                "temperature": 0,
+                "num_predict": 300,
+                "num_ctx": 3072,
+                "top_k": 1,
+                "top_p": 0.1
             }
-        ],
-        "stream": False,
-        "format": "json",
-        "keep_alive": "30m",
-        "options": {
-            "temperature": 0,
-            "num_predict": 80,
-            "num_ctx": 3072,
-            "stop" : ["Wait"],
-            "top_k": 1,
-            "top_p": 0.1
         }
-    }
 
-    try:
-        response = requests.post(url, json=payload, timeout=180)
+    last_error = None
 
-        print("Ollama status code:", response.status_code)
-        print("Ollama raw response:", response.text)
+    for attempt in range(3):  # one retry if the first attempt yields empty content
+        nudge = "" if attempt == 0 else "Respond with the JSON object now. Do not explain, just output JSON."
+        payload = make_payload(nudge)
 
-        response.raise_for_status()
+        try:
+            response = requests.post(url, json=payload, timeout=180)
+            print(f"Ollama status code (attempt {attempt}):", response.status_code)
+            print(f"Ollama raw response (attempt {attempt}):", response.text)
 
-        response_json = response.json()
-        model_text = response_json["message"]["content"]
+            response.raise_for_status()
+            response_json = response.json()
+            model_text = response_json["message"]["content"]
 
-        print("Ollama model text:", model_text)
+            print(f"Ollama model text (attempt {attempt}):", model_text)
 
-        return build_action_response_from_text(model_text)
+            if model_text and model_text.strip():
+                return build_action_response_from_text(model_text)
 
-    except Exception as e:
-        print("Ollama failed:", e)
+            last_error = "empty content"
 
-        return fallback_response(
-            reason="Local model failed. Please try again."
-        )
+        except Exception as e:
+            print(f"Ollama failed (attempt {attempt}):", e)
+            last_error = str(e)
+
+    return fallback_response(reason=f"Local model failed after retry: {last_error}")

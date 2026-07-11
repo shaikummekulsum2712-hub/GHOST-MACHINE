@@ -6,7 +6,9 @@ import json
 
 from agent.agent_loop import get_next_action as agent_get_next_action
 from agent.action_schema import CommandRequest, ActionResponse
+from agent.safety_filter import apply_safety_filter
 
+CONFIDENCE_FLOOR = 0.55  # tune once you have real logs of model confidence
 
 app = FastAPI(title="Ghost Machine Backend")
 
@@ -118,16 +120,16 @@ async def analyze_screen(
     print("Android uncertainty:", android_uncertainty)
 
     try:
-        action = agent_get_next_action(
-            command=command,
-            screenshot_path=str(screenshot_path),
-            screen_elements_json=screen_elements_json,
-            parsed_intent=parsed_intent,
-            parsed_target=parsed_target,
-            android_uncertainty=android_uncertainty,
-            previous_action=previous_action,
-            reply_language=reply_language
-        )
+            action = agent_get_next_action(
+                command=command,
+                screenshot_path=str(screenshot_path),
+                screen_elements_json=screen_elements_json,
+                parsed_intent=parsed_intent,
+                parsed_target=parsed_target,
+                android_uncertainty=android_uncertainty,
+                previous_action=previous_action,
+                reply_language=reply_language
+            )
     except Exception as e:
         update_status(
             status="error",
@@ -141,6 +143,17 @@ async def analyze_screen(
             error=str(e),
         )
         raise
+
+    # --- Safety filter: deterministic keyword block, runs first, always ---
+    action = apply_safety_filter(action, command=command)
+
+    # --- Confidence floor: downgrade uncertain non-blocked actions to ask_user ---
+    if action.action != "ask_user" and action.confidence < CONFIDENCE_FLOOR:
+        action = action.model_copy(update={
+            "action": "ask_user",
+            "user_message": action.user_message or "I'm not fully sure — can you clarify?",
+            "reason": f"{action.reason} (confidence {action.confidence:.2f} below floor)",
+        })
 
     update_status(
         status="success",

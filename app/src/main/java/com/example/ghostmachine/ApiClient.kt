@@ -12,11 +12,21 @@ object ApiClient {
 
     private const val TAG = "ApiClient"
 
-    // Phone -> laptop, over wifi. Must be the laptop's LAN IP, not 127.0.0.1
-    // (127.0.0.1 on the phone points back at the phone itself).
-    // Also make sure the backend is started with `--host 0.0.0.0`, or it will
-    // only accept connections from the laptop itself even with the right IP here.
-    private const val BASE_URL = "http://192.168.1.8:8000"
+    // Phone -> laptop, over wifi. Must be the laptop's LAN IP, not 127.0.0.1.
+    // Backend must be started with --host 0.0.0.0.
+    private const val BASE_URL = "http://192.168.1.6:8000"
+
+    sealed class AnalyzeResult {
+        data class Success(val json: String) : AnalyzeResult()
+        data class ServerError(val code: Int, val body: String?) : AnalyzeResult()
+        data class NetworkError(val message: String) : AnalyzeResult()
+    }
+
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(180, TimeUnit.SECONDS)
+        .writeTimeout(60, TimeUnit.SECONDS)
+        .build()
 
     fun analyzeScreen(
         command: String,
@@ -27,17 +37,11 @@ object ApiClient {
         androidUncertainty: String,
         previousAction: String?,
         replyLanguage: String
-    ): String? {
+    ): AnalyzeResult {
         return try {
-            val client = OkHttpClient.Builder()
-                .connectTimeout(20, TimeUnit.SECONDS)
-                .readTimeout(180, TimeUnit.SECONDS)
-                .writeTimeout(60, TimeUnit.SECONDS)
-                .build()
-
             val screenshotBody = screenshotBytes.toRequestBody("image/jpeg".toMediaType())
 
-            val multipartBodyBuilder = MultipartBody.Builder()
+            val bodyBuilder = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
                 .addFormDataPart("command", command)
                 .addFormDataPart("screen_elements_json", screenElementsJson)
@@ -48,28 +52,31 @@ object ApiClient {
                 .addFormDataPart("screenshot", "screen.jpg", screenshotBody)
 
             if (!previousAction.isNullOrBlank()) {
-                multipartBodyBuilder.addFormDataPart("previous_action", previousAction)
+                bodyBuilder.addFormDataPart("previous_action", previousAction)
             }
 
             val request = Request.Builder()
                 .url("$BASE_URL/analyze-screen")
-                .post(multipartBodyBuilder.build())
+                .post(bodyBuilder.build())
                 .build()
 
             client.newCall(request).execute().use { response ->
                 val bodyText = response.body?.string()
-
-                if (!response.isSuccessful) {
-                    Log.e(TAG, "Backend error: ${response.code} $bodyText")
-                    return null
+                when {
+                    !response.isSuccessful -> {
+                        Log.e(TAG, "Backend error: ${response.code} $bodyText")
+                        AnalyzeResult.ServerError(response.code, bodyText)
+                    }
+                    bodyText.isNullOrBlank() -> {
+                        Log.e(TAG, "Backend returned empty body")
+                        AnalyzeResult.ServerError(response.code, "empty body")
+                    }
+                    else -> AnalyzeResult.Success(bodyText)
                 }
-
-                bodyText
             }
         } catch (e: Exception) {
             Log.e(TAG, "analyzeScreen failed", e)
-            null
-
+            AnalyzeResult.NetworkError(e.message ?: "unknown network error")
         }
     }
 }
