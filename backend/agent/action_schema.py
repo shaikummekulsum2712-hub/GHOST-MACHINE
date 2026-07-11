@@ -9,24 +9,18 @@ class CommandRequest(BaseModel):
 class ActionResponse(BaseModel):
     action: Literal["tap", "swipe", "type", "wait", "done", "ask_user"]
 
-    # fallback coordinates from VLM
+    element_id: int | None = None
+    grid_cell: str | None = None
+
     x: float | None = None
     y: float | None = None
 
-    # for typing
     text: str | None = None
-
-    # for swiping
     direction: Literal["up", "down", "left", "right"] | None = None
 
-    # best new field:
-    # Android sends visible UI elements with ids,
-    # VLM chooses the element_id to tap.
-    element_id: int | None = None
-
-    # optional backup hints
     target_text: str | None = None
     target_description: str | None = None
 
     reason: str
+    user_message: str | None = None
     confidence: float

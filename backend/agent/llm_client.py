@@ -7,31 +7,16 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+
+
 from agent.action_schema import ActionResponse
 from agent.prompt_builder import build_vision_prompt
 
 
 load_dotenv()
 
-
-# 1. NVIDIA / Qwen
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
-NVIDIA_MODEL = os.getenv("NVIDIA_MODEL")
-NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL")
-
-# 2. OpenRouter
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL")
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-
-# 3. Hugging Face
-HF_API_KEY = os.getenv("HF_API_KEY")
-HF_MODEL = os.getenv("HF_MODEL")
-HF_BASE_URL = os.getenv("HF_BASE_URL", "https://router.huggingface.co/v1")
-
-# 4. Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:2b")
 
 
 def encode_image_to_base64(image_path: str) -> str:
@@ -40,20 +25,7 @@ def encode_image_to_base64(image_path: str) -> str:
     if not image_file.exists():
         raise FileNotFoundError(f"Screenshot not found: {image_path}")
 
-    image_bytes = image_file.read_bytes()
-    return base64.b64encode(image_bytes).decode("utf-8")
-
-
-def get_image_mime_type(image_path: str) -> str:
-    suffix = Path(image_path).suffix.lower()
-
-    if suffix in [".jpg", ".jpeg"]:
-        return "image/jpeg"
-
-    if suffix == ".webp":
-        return "image/webp"
-
-    return "image/png"
+    return base64.b64encode(image_file.read_bytes()).decode("utf-8")
 
 
 def clean_model_json(model_text: str) -> str:
@@ -76,10 +48,9 @@ def clean_model_json(model_text: str) -> str:
 
     cleaned = cleaned[first_brace:last_brace + 1]
 
-    # Fix common Qwen mistake:
+    # Fix bad coordinate mistake:
     # "x": 386, 223,
-    # becomes:
-    # "x": 386,
+    # -> "x": 386,
     cleaned = re.sub(
         r'("x"\s*:\s*-?\d+(?:\.\d+)?),\s*-?\d+(?:\.\d+)?\s*,',
         r'\1,',
@@ -99,15 +70,16 @@ def build_action_response_from_text(model_text: str) -> ActionResponse:
     clean_json = clean_model_json(model_text)
     action_dict = json.loads(clean_json)
 
-    # Fill missing fields so one bad/missing key does not break the whole app
+    action_dict.setdefault("element_id", None)
+    action_dict.setdefault("grid_cell", None)
     action_dict.setdefault("x", None)
     action_dict.setdefault("y", None)
     action_dict.setdefault("text", None)
     action_dict.setdefault("direction", None)
-    action_dict.setdefault("element_id", None)
     action_dict.setdefault("target_text", None)
     action_dict.setdefault("target_description", None)
     action_dict.setdefault("reason", "No reason provided.")
+    action_dict.setdefault("user_message", None)
     action_dict.setdefault("confidence", 0.8)
 
     return ActionResponse(**action_dict)
@@ -116,253 +88,85 @@ def build_action_response_from_text(model_text: str) -> ActionResponse:
 def fallback_response(reason: str) -> ActionResponse:
     return ActionResponse(
         action="ask_user",
+        element_id=None,
+        grid_cell=None,
         x=None,
         y=None,
         text=None,
         direction=None,
-        element_id=None,
         target_text=None,
         target_description=None,
         reason=reason,
+        user_message="Something went wrong. Please try again.",
         confidence=1.0
     )
-
-
-def call_openai_style_provider(
-    provider_name: str,
-    base_url: str,
-    api_key: str,
-    model: str,
-    prompt: str,
-    image_base64: str,
-    mime_type: str,
-    extra_headers: dict | None = None
-) -> ActionResponse | None:
-    url = f"{base_url.rstrip('/')}/chat/completions"
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    if extra_headers:
-        headers.update(extra_headers)
-
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime_type};base64,{image_base64}"
-                        }
-                    }
-                ]
-            }
-        ],
-        "temperature": 0,
-        "max_tokens": 300
-    }
-
-    try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-
-        print(f"{provider_name} status code:", response.status_code)
-        print(f"{provider_name} raw response:", response.text)
-
-        response.raise_for_status()
-
-        response_json = response.json()
-        model_text = response_json["choices"][0]["message"]["content"]
-
-        print(f"{provider_name} model text:", model_text)
-
-        return build_action_response_from_text(model_text)
-
-    except Exception as e:
-        print(f"{provider_name} failed:", e)
-        return None
-
-
-def call_qwen(
-    prompt: str,
-    image_base64: str,
-    mime_type: str
-) -> ActionResponse | None:
-    if not NVIDIA_API_KEY or not NVIDIA_MODEL or not NVIDIA_BASE_URL:
-        print("Qwen skipped: NVIDIA env values missing")
-        return None
-
-    return call_openai_style_provider(
-        provider_name="NVIDIA/Qwen",
-        base_url=NVIDIA_BASE_URL,
-        api_key=NVIDIA_API_KEY,
-        model=NVIDIA_MODEL,
-        prompt=prompt,
-        image_base64=image_base64,
-        mime_type=mime_type
-    )
-
-
-def call_openrouter(
-    prompt: str,
-    image_base64: str,
-    mime_type: str
-) -> ActionResponse | None:
-    if not OPENROUTER_API_KEY or not OPENROUTER_MODEL:
-        print("OpenRouter skipped: OPENROUTER env values missing")
-        return None
-
-    return call_openai_style_provider(
-        provider_name="OpenRouter",
-        base_url=OPENROUTER_BASE_URL,
-        api_key=OPENROUTER_API_KEY,
-        model=OPENROUTER_MODEL,
-        prompt=prompt,
-        image_base64=image_base64,
-        mime_type=mime_type,
-        extra_headers={
-            "HTTP-Referer": "http://localhost",
-            "X-Title": "Ghost Machine"
-        }
-    )
-
-
-def call_huggingface(
-    prompt: str,
-    image_base64: str,
-    mime_type: str
-) -> ActionResponse | None:
-    if not HF_API_KEY or not HF_MODEL:
-        print("Hugging Face skipped: HF env values missing")
-        return None
-
-    return call_openai_style_provider(
-        provider_name="HuggingFace",
-        base_url=HF_BASE_URL,
-        api_key=HF_API_KEY,
-        model=HF_MODEL,
-        prompt=prompt,
-        image_base64=image_base64,
-        mime_type=mime_type
-    )
-
-
-def call_gemini(
-    prompt: str,
-    image_base64: str,
-    mime_type: str
-) -> ActionResponse | None:
-    if not GEMINI_API_KEY:
-        print("Gemini skipped: GEMINI_API_KEY missing")
-        return None
-
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/"
-        f"models/{GEMINI_MODEL}:generateContent"
-    )
-
-    headers = {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY,
-    }
-
-    payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": prompt
-                    },
-                    {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": image_base64
-                        }
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0,
-            "maxOutputTokens": 300,
-            "responseMimeType": "application/json"
-        }
-    }
-
-    try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-
-        print("Gemini status code:", response.status_code)
-        print("Gemini raw response:", response.text)
-
-        response.raise_for_status()
-
-        response_json = response.json()
-        model_text = response_json["candidates"][0]["content"]["parts"][0]["text"]
-
-        print("Gemini model text:", model_text)
-
-        return build_action_response_from_text(model_text)
-
-    except Exception as e:
-        print("Gemini failed:", e)
-        return None
-
 
 def call_vision_model(
     command: str,
     screenshot_path: str,
-    screen_elements_json: str | None = None
+    screen_elements_json: str | None = None,
+    parsed_intent: str | None = None,
+    parsed_target: str | None = None,
+    android_uncertainty: str | None = None,
+    previous_action: str | None = None,
+    reply_language: str | None = None
 ) -> ActionResponse:
     prompt = build_vision_prompt(
         command=command,
-        screen_elements_json=screen_elements_json
+        screen_elements_json=screen_elements_json,
+        parsed_intent=parsed_intent,
+        parsed_target=parsed_target,
+        android_uncertainty=android_uncertainty,
+        previous_action=previous_action,
+        reply_language=reply_language
     )
 
     image_base64 = encode_image_to_base64(screenshot_path)
-    mime_type = get_image_mime_type(screenshot_path)
+    url = f"{OLLAMA_BASE_URL.strip('/')}/api/chat"
 
-    providers = [
-        ("Qwen", call_qwen),
-        ("OpenRouter", call_openrouter),
-        ("HuggingFace", call_huggingface),
-        ("Gemini", call_gemini),
-    ]
+    def make_payload(extra_nudge: str = "") -> dict:
+        final_prompt = prompt if not extra_nudge else prompt + "\n\n" + extra_nudge
+        return {
+            "model": OLLAMA_MODEL,
+            "messages": [
+                {"role": "user", "content": final_prompt, "images": [image_base64]}
+            ],
+            "stream": False,
+            "format": "json",
+            "keep_alive": "30m",
+            "options": {
+                "temperature": 0,
+                "num_predict": 300,
+                "num_ctx": 3072,
+                "top_k": 1,
+                "top_p": 0.1
+            }
+        }
 
-    for provider_name, provider_func in providers:
-        print(f"Trying provider: {provider_name}")
+    last_error = None
 
-        result = provider_func(
-            prompt=prompt,
-            image_base64=image_base64,
-            mime_type=mime_type
-        )
+    for attempt in range(3):  # one retry if the first attempt yields empty content
+        nudge = "" if attempt == 0 else "Respond with the JSON object now. Do not explain, just output JSON."
+        payload = make_payload(nudge)
 
-        if result is not None:
-            print(f"Provider succeeded: {provider_name}")
-            return result
+        try:
+            response = requests.post(url, json=payload, timeout=180)
+            print(f"Ollama status code (attempt {attempt}):", response.status_code)
+            print(f"Ollama raw response (attempt {attempt}):", response.text)
 
-        print(f"Provider failed, moving to next: {provider_name}")
+            response.raise_for_status()
+            response_json = response.json()
+            model_text = response_json["message"]["content"]
 
-    return fallback_response(
-        reason="I could not process this right now. Please try again in a few seconds."
-    )
+            print(f"Ollama model text (attempt {attempt}):", model_text)
+
+            if model_text and model_text.strip():
+                return build_action_response_from_text(model_text)
+
+            last_error = "empty content"
+
+        except Exception as e:
+            print(f"Ollama failed (attempt {attempt}):", e)
+            last_error = str(e)
+
+    return fallback_response(reason=f"Local model failed after retry: {last_error}")

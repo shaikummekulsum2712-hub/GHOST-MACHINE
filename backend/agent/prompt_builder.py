@@ -1,53 +1,86 @@
 def build_vision_prompt(
     command: str,
     screen_elements_json: str | None = None,
-    previous_action=None
+    parsed_intent: str | None = None,
+    parsed_target: str | None = None,
+    android_uncertainty: str | None = None,
+    previous_action: str | None = None,
+    reply_language: str | None = None
 ) -> str:
-    previous_action_text = "None"
-
-    if previous_action:
-        previous_action_text = previous_action.model_dump_json()
-
     elements_text = screen_elements_json or "[]"
+    language = reply_language or "english"
 
-    prompt = f"""
-You are an Android control agent.
+    return f"""
+/no_think
+
+You are selecting ONE next Android action.
 
 User command:
 {command}
 
-Previous action:
-{previous_action_text}
+Parsed intent:
+{parsed_intent or "unknown"}
 
-Visible UI elements:
+Parsed target:
+{parsed_target or "unknown"}
+
+Reply language:
+{language}
+
+Android uncertainty:
+{android_uncertainty or "Android could not confidently choose an element."}
+
+Previous action:
+{previous_action or "none"}
+
+UI elements:
 {elements_text}
 
-Return only ONE next action JSON.
+Element format:
+i = element id
+t = visible text
+d = content description
+b = bounds [left, top, right, bottom]
+c = clickable, 1 or 0
+e = editable, 1 or 0
+
+Screenshot:
+Provided image.
+
+Grid:
+The screenshot is divided into 10 columns A-J and 10 rows 1-10.
+Use grid_cell only if no element_id is suitable.
+Example: A1 is top-left, J10 is bottom-right.
 
 Rules:
-- Prefer element_id from visible UI elements.
-- Use x/y only if no element matches.
-- For search commands: tap search field, then next step type query, then submit if needed.
-- For risky actions like delete, pay, send, confirm, submit, transfer, return ask_user.
-- Return done only when the user goal is already achieved.
-If a text input is already focused and the user wants to enter/search text, return action "type", not "tap".
-Do not return "tap" with a non-null text field. Use "type" for entering text.
-JSON must be strictly valid. x and y must be single numbers only. Never write coordinate pairs like "x": 386, 223.
+1. Prefer element_id from UI elements.
+2. If no element_id matches, use grid_cell.
+3. Use x/y only as last fallback.
+4. Return only ONE action.
+5. For entering text, use action "type".
+6. For risky actions like send, pay, delete, confirm, submit, use ask_user.
+7. If action is ask_user, user_message must be in the reply language.
+8. If reply_language is hinglish, user_message should be casual Hinglish.
+9. If reply_language is telugu, user_message should be simple roman Telugu.
+10. reason must be less than 8 words.
+11. Return valid raw JSON only.
+12. No markdown. No explanation.
+
 JSON format:
 {{
-  "action": "tap | swipe | type | wait | done | ask_user",
-  "x": number or null,
-  "y": number or null,
-  "text": string or null,
-  "direction": "up | down | left | right" or null,
-  "element_id": number or null,
-  "target_text": string or null,
-  "target_description": string or null,
+  "action": "tap|type|swipe|wait|done|ask_user",
+  "element_id": number|null,
+  "grid_cell": "A1-J10"|null,
+  "x": number|null,
+  "y": number|null,
+  "text": string|null,
+  "direction": "up|down|left|right"|null,
+  "target_text": string|null,
+  "target_description": string|null,
   "reason": "short reason",
-  "confidence": number between 0 and 1
+  "user_message": string|null,
+  "confidence": number
 }}
-
-Return ONLY raw JSON. No markdown. No explanation.
 """
 
     return prompt.strip()
