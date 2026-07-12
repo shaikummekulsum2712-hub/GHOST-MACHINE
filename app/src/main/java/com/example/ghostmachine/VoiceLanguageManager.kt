@@ -171,6 +171,14 @@ object VoiceLanguageManager {
 
     fun parseNormalizedCommand(command: String): Pair<String, String> {
         val lower = command.lowercase().trim()
+
+        // Compound pattern: "type X and send it" / "type X and send"
+        val typeSendRegex = Regex("^type (.+?) and send( it)?$")
+        typeSendRegex.find(lower)?.let { match ->
+            val message = match.groupValues[1].trim()
+            if (message.isNotBlank()) return "type_and_send" to message
+        }
+
         val tokens = lower.split(Regex("\\s+")).filter { it.isNotBlank() }
 
         // Fixed-phrase intents that don't take a free-text target - keep these
@@ -181,6 +189,10 @@ object VoiceLanguageManager {
             lower.contains("go back") || lower == "back" -> return "back" to ""
             lower == "home" -> return "home" to ""
             lower == "stop" || lower == "cancel" -> return "stop" to ""
+        }
+
+        if (lower == "send" || lower == "send it" || lower == "send the message" || lower.contains("send message")) {
+            return "send" to ""
         }
 
         // Trigger-word intents, checked in priority order. First one whose

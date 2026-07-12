@@ -65,6 +65,7 @@ Rules:
 10. reason must be less than 8 words.
 11. Return valid raw JSON only.
 12. No markdown. No explanation.
+13. target_text is REQUIRED whenever action is "tap". Always include it.
 
 JSON format:
 {{

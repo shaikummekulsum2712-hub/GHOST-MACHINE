@@ -387,6 +387,7 @@ class GhostAccessibilityService : AccessibilityService() {
         // through the vision loop instead of being short-circuited here.
         if (parsed.intent == "open_chat") return false
 
+
         val lower = command.lowercase().trim()
         if (!lower.contains("open")) return false
 
@@ -475,11 +476,40 @@ class GhostAccessibilityService : AccessibilityService() {
                     return
                 }
                 Thread.sleep(APP_LAUNCH_DELAY_MS)
+            } else {
+                // Already in the app. Only back out if there's evidence we're on a
+                // nested screen (contact profile, etc.) - blindly backing out from
+                // the chat list itself exits the app entirely.
+                val currentElements = collectScreenElements()
+                val looksLikeNestedScreen = currentElements.any {
+                    val d = (it.contentDescription ?: "").lowercase()
+                    d.contains("voice call") || d.contains("video call") ||
+                            d.contains("media, links") || d.contains("more options")
+                }
+                if (looksLikeNestedScreen) {
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    Thread.sleep(400)
+                }
+            }
+        }
+
+        if (parsed.intent == "search") {
+            val inBrowser = currentForegroundPackage() in setOf("com.android.chrome", "com.google.android.googlequicksearchbox")
+            if (!inBrowser) {
+                mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
+                val launched = ensureAppOpen("com.google.android.googlequicksearchbox")
+                if (!launched) {
+                    speakAndFinish("error", replyLanguage)
+                    return
+                }
+                Thread.sleep(APP_LAUNCH_DELAY_MS)
             }
         }
 
         var previousAction: Action? = null
         var previousSignature: String? = null
+        var repeatedFailCount = 0
+        var lastAttemptedTarget: String? = null
 
         for (step in 1..MAX_STEPS) {
             Log.d(TAG, "===== STEP $step =====")
@@ -490,6 +520,26 @@ class GhostAccessibilityService : AccessibilityService() {
             val screenChanged = previousSignature != null && signature != previousSignature
 
             Log.d(TAG, "Collected ${elements.size} elements, changed=$screenChanged")
+
+            if (isGoalAchieved(parsed, elements, previousAction, screenChanged)) {
+                Log.d(TAG, "Goal achieved")
+                speakAndFinish("done", replyLanguage)
+                return
+            }
+
+            val currentTargetKey = "${parsed.intent}:${parsed.target}"
+            if (previousAction != null && !screenChanged && lastAttemptedTarget == currentTargetKey) {
+                repeatedFailCount++
+            } else {
+                repeatedFailCount = 0
+            }
+            lastAttemptedTarget = currentTargetKey
+
+            if (repeatedFailCount >= 2) {
+                Log.d(TAG, "Same action attempted repeatedly with no screen change - escalating to ask_user")
+                speakAndFinish("need_help", replyLanguage, overrideStatus = "I tried a couple of times but nothing changed - can you help me out?")
+                return
+            }
 
             if (isGoalAchieved(parsed, elements, previousAction, screenChanged)) {
                 Log.d(TAG, "Goal achieved")
@@ -626,25 +676,72 @@ class GhostAccessibilityService : AccessibilityService() {
                     Action(ActionType.NONE, reason = "no editable field found for type", confidence = 0.3)
                 }
             }
-
             "search" -> {
-                val searchMatches = elements.filter {
-                    val t = (it.text ?: "").lowercase()
-                    val d = (it.contentDescription ?: "").lowercase()
-                    it.editable || t.contains("search") || d.contains("search")
-                }
-                val editableSearch = searchMatches.firstOrNull { it.editable }
+                val inBrowser = currentForegroundPackage() in setOf("com.android.chrome", "com.google.android.googlequicksearchbox")
+                if (!inBrowser) {
+                    Action(ActionType.NONE, reason = "search requires a browser open first", confidence = 0.2)
+                } else {
+                    // existing search-matching logic unchanged
+                    val searchMatches = elements.filter {
+                        val t = (it.text ?: "").lowercase()
+                        val d = (it.contentDescription ?: "").lowercase()
+                        it.editable || t.contains("search") || d.contains("search")
+                    }
+                    val editableSearch = searchMatches.firstOrNull { it.editable }
 
-                when {
-                    editableSearch != null -> Action(
-                        ActionType.TAP_THEN_TYPE, element = editableSearch, text = parsed.target,
-                        reason = "search field found", confidence = 0.95
-                    )
-                    searchMatches.size == 1 -> Action(
-                        ActionType.TAP_THEN_TYPE, element = searchMatches.first(), text = parsed.target,
-                        reason = "search element found", confidence = 0.85
-                    )
-                    else -> Action(ActionType.NONE, reason = "multiple or no search matches", confidence = 0.4)
+                    when {
+                        editableSearch != null -> Action(
+                            ActionType.TAP_THEN_TYPE, element = editableSearch, text = parsed.target,
+                            reason = "search field found", confidence = 0.95
+                        )
+                        searchMatches.size == 1 -> Action(
+                            ActionType.TAP_THEN_TYPE, element = searchMatches.first(), text = parsed.target,
+                            reason = "search element found", confidence = 0.85
+                        )
+                        else -> Action(ActionType.NONE, reason = "multiple or no search matches", confidence = 0.4)
+                    }
+                }
+                }
+
+
+            "send" -> {
+                val sendButton = elements.firstOrNull {
+                    val d = (it.contentDescription ?: "").lowercase()
+                    it.clickable && d == "send"   // exact match, not "contains" - avoids matching "send money"/other noise
+                } ?: elements.firstOrNull {
+                    val d = (it.contentDescription ?: "").lowercase()
+                    it.clickable && d.contains("send") && !d.contains("voice") && !d.contains("money")
+                }
+
+                if (sendButton != null) {
+                    Action(ActionType.TAP, element = sendButton, reason = "send button found", confidence = 0.9)
+                } else {
+                    Action(ActionType.NONE, reason = "send button not found", confidence = 0.3)
+                }
+            }
+
+
+            "type_and_send" -> {
+                val editable = elements.firstOrNull { it.editable }
+                val alreadyTyped = editable != null && (editable.text ?: "").lowercase().contains(target)
+
+                if (!alreadyTyped) {
+                    if (editable != null || isAnyInputFocused()) {
+                        Action(ActionType.TYPE, element = editable, text = parsed.target, reason = "input ready", confidence = 0.95)
+                    } else {
+                        Action(ActionType.NONE, reason = "no editable field found", confidence = 0.3)
+                    }
+                } else {
+                    val sendButton = elements.firstOrNull {
+                        val d = (it.contentDescription ?: "").lowercase()
+                        val t = (it.text ?: "").lowercase()
+                        it.clickable && (d.contains("send") || t.contains("send"))
+                    }
+                    if (sendButton != null) {
+                        Action(ActionType.TAP, element = sendButton, reason = "send button found", confidence = 0.9)
+                    } else {
+                        Action(ActionType.NONE, reason = "send button not found", confidence = 0.3)
+                    }
                 }
             }
 
@@ -695,6 +792,11 @@ class GhostAccessibilityService : AccessibilityService() {
                 hasTarget && hasMessageInput
             }
 
+            "type_and_send" -> {
+                val editable = elements.firstOrNull { it.editable }
+                previousAction?.type == ActionType.TAP && (editable == null || (editable.text ?: "").isBlank())
+            }
+
             "type" -> {
                 if (target.isBlank()) return false
                 elements.any { it.editable && (it.text ?: "").lowercase().contains(target) }
@@ -704,6 +806,8 @@ class GhostAccessibilityService : AccessibilityService() {
                 if (target.isBlank()) return false
                 elements.any { it.editable && (it.text ?: "").lowercase().contains(target) }
             }
+
+            "send" -> previousAction?.type == ActionType.TAP
 
             "tap" -> previousAction?.type == ActionType.TAP && screenChanged
             "scroll" -> previousAction?.type == ActionType.SWIPE && screenChanged
@@ -732,7 +836,18 @@ class GhostAccessibilityService : AccessibilityService() {
                     warnSensitiveBlocked()
                     return false
                 }
-                performType(text)
+                val typed = performType(text)
+                if (typed) return@executeAction true
+
+                val point = resolveTapPoint(action)
+                if (point != null) {
+                    val tapped = performTap(point.first, point.second)
+                    if (tapped) {
+                        Thread.sleep(500)
+                        return@executeAction performType(text)
+                    }
+                }
+                false
             }
 
             ActionType.TAP -> {
@@ -797,14 +912,13 @@ class GhostAccessibilityService : AccessibilityService() {
     // -----------------------------------------------------------------
     // VLM response parsing
     // -----------------------------------------------------------------
-
     private fun parseVlmAction(responseJson: String, elements: List<UiElement>): Action? {
         return try {
             val obj = JSONObject(responseJson)
 
             val actionStr = obj.optString("action")
             val gridCell = if (obj.isNull("grid_cell")) null else obj.optString("grid_cell")
-            val text = if (obj.isNull("text")) null else obj.optString("text")
+            val rawText = if (obj.isNull("text")) null else obj.optString("text")
             val direction = if (obj.isNull("direction")) null else obj.optString("direction")
             val targetText = if (obj.isNull("target_text")) null else obj.optString("target_text")
             val reason = obj.optString("reason", "")
@@ -812,6 +926,16 @@ class GhostAccessibilityService : AccessibilityService() {
             val confidence = if (obj.isNull("confidence")) 0.8 else obj.optDouble("confidence", 0.8)
             val x = if (obj.isNull("x")) null else obj.optDouble("x").toFloat()
             val y = if (obj.isNull("y")) null else obj.optDouble("y").toFloat()
+
+            // The model sometimes puts the actual text-to-type into target_text
+            // instead of text (confusing "what to type" with "what to find").
+            // Fall back so a type action never silently fails just because the
+            // model picked the wrong field for the same information.
+            val finalText = when {
+                !rawText.isNullOrBlank() -> rawText
+                !targetText.isNullOrBlank() -> targetText
+                else -> null
+            }
 
             val type = when (actionStr) {
                 "tap" -> ActionType.TAP
@@ -835,52 +959,53 @@ class GhostAccessibilityService : AccessibilityService() {
                 )
             }
 
-            // IMPORTANT: we deliberately ignore the model's element_id. Small
-            // vision models are unreliable at counting/indexing through a
-            // numbered list - they reason correctly about *what* they want,
-            // then frequently emit the wrong number. Instead, we resolve the
-            // element ourselves by matching target_text against the elements
-            // we already sent, which is exactly what the on-device heuristics
-            // do and is far more reliable than trusting a model-picked index.
             var resolvedElement: UiElement? = null
 
-            if (type == ActionType.TAP && !targetText.isNullOrBlank()) {
-                val wanted = targetText.lowercase().trim()
-                val matches = elements.filter {
-                    val t = (it.text ?: "").lowercase()
-                    val d = (it.contentDescription ?: "").lowercase()
-                    t.contains(wanted) || d.contains(wanted) || wanted.contains(t.takeIf { it.isNotBlank() } ?: "\u0000")
-                }
+            if (type == ActionType.TAP || type == ActionType.TYPE) {
+                val searchTerm = listOfNotNull(targetText, rawText, reason)
+                    .map { it.lowercase().trim() }
+                    .firstOrNull { it.isNotBlank() && it.length > 1 }
 
-                resolvedElement = when {
-                    matches.size == 1 -> matches.first()
-                    matches.size > 1 -> matches.minByOrNull {
-                        // Prefer the closest match to the model's suggested x/y if it gave one
-                        if (x != null && y != null) {
-                            val dx = it.centerX() - x
-                            val dy = it.centerY() - y
-                            dx * dx + dy * dy
-                        } else 0f
+                if (searchTerm != null) {
+                    val matches = elements.filter {
+                        val t = (it.text ?: "").lowercase()
+                        val d = (it.contentDescription ?: "").lowercase()
+                        val isAvatarLike = d.contains("picture") || d.contains("photo") || d.contains("avatar")
+                        !isAvatarLike && (t.contains(searchTerm) || d.contains(searchTerm) || (t.isNotBlank() && searchTerm.contains(t)))
                     }
-                    else -> null
-                }
 
-                if (resolvedElement == null) {
-                    Log.d(TAG, "VLM wanted '$wanted' but no element matched it in the current tree")
-                    return Action(
-                        type = ActionType.ASK_USER,
-                        reason = "could not find '$wanted' on screen",
-                        userMessage = userMessage ?: "I couldn't find that on screen - can you check?",
-                        confidence = confidence,
-                        source = "vlm"
-                    )
+                    resolvedElement = when {
+                        matches.size == 1 -> matches.first()
+                        matches.size > 1 -> matches.maxByOrNull { el ->
+                            var score = 0
+                            if (el.clickable) score += 100
+                            score += (el.right - el.left)
+                            score
+                        }
+                        else -> null
+                    }
                 }
             }
+
+            var earlyAskUser: Action? = null
+            if (type == ActionType.TAP && resolvedElement == null && x == null && y == null) {
+                Log.d(TAG, "VLM tap: no text match and no coordinates available")
+                earlyAskUser = Action(
+                    type = ActionType.ASK_USER,
+                    reason = "could not resolve tap target",
+                    userMessage = userMessage ?: "I couldn't find that on screen - can you check?",
+                    confidence = confidence,
+                    source = "vlm"
+                )
+            }
+            if (earlyAskUser != null) return earlyAskUser
+
+
 
             Action(
                 type = type,
                 element = resolvedElement,
-                text = text,
+                text = finalText,
                 direction = direction,
                 gridCell = gridCell,
                 x = x,
@@ -895,6 +1020,7 @@ class GhostAccessibilityService : AccessibilityService() {
             null
         }
     }
+
 
     // -----------------------------------------------------------------
     // Screen reading
@@ -956,7 +1082,7 @@ class GhostAccessibilityService : AccessibilityService() {
         val candidateElements = if (intent == "open_chat") {
             elements.filterNot {
                 val d = (it.contentDescription ?: "").lowercase()
-                d.contains("status") || d.contains("update")
+                d.contains("status") || d.contains("update") || d.contains("picture") || d.contains("photo") || d.contains("avatar")
             }
         } else {
             elements
