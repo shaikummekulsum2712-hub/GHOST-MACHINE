@@ -454,205 +454,219 @@ class GhostAccessibilityService : AccessibilityService() {
         return knownApps["whatsapp"] ?: "com.whatsapp"
     }
 
+    private fun performImeEnter(): Boolean {
+        return try {
+            val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            focused?.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER) ?: false
+        } catch (e: Exception) {
+            Log.e(TAG, "performImeEnter failed", e)
+            false
+        }
+    }
     // -----------------------------------------------------------------
     // Vision loop
     // -----------------------------------------------------------------
 
+
     private fun runVisionLoop(command: String, parsed: ParsedCommand, replyLanguage: String) {
-        Log.d(TAG, "==============================")
-        Log.d(TAG, "NEW COMMAND: $command | intent=${parsed.intent} target=${parsed.target}")
-        Log.d(TAG, "==============================")
+            Log.d(TAG, "==============================")
+            Log.d(TAG, "NEW COMMAND: $command | intent=${parsed.intent} target=${parsed.target}")
+            Log.d(TAG, "==============================")
 
-        // Preconditions: some intents need a specific app in the foreground
-        // before anything else makes sense.
-        if (parsed.intent == "open_chat") {
-            val targetPackage = resolveChatAppPackage()
-            if (currentForegroundPackage() != targetPackage) {
+            // Guard: don't waste a full VLM cycle on an empty/blank target for
+            // intents that require one.
+            if (parsed.intent in setOf("search", "type", "type_and_send") && parsed.target.isBlank()) {
+                speakAndFinish("need_help", replyLanguage, overrideStatus = "What would you like me to say or search for?")
+                return
+            }
+
+            // Preconditions: some intents need a specific app in the foreground
+            // before anything else makes sense.
+            if (parsed.intent == "open_chat") {
+                val targetPackage = resolveChatAppPackage()
+                if (currentForegroundPackage() != targetPackage) {
+                    mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
+                    val launched = ensureAppOpen(targetPackage)
+                    Log.d(TAG, "ensureAppOpen($targetPackage) = $launched")
+                    if (!launched) {
+                        speakAndFinish("error", replyLanguage)
+                        return
+                    }
+                    Thread.sleep(APP_LAUNCH_DELAY_MS)
+                } else {
+                    // Already in the app - trust the current screen and search it
+                    // directly. (Heuristic back-press removed: it was misfiring on
+                    // the chat list itself, since WhatsApp's "more options" button
+                    // matched the same signal used to detect a nested screen, so it
+                    // was exiting the app instead of staying put.)
+                }
+            }
+
+            if (parsed.intent == "search") {
+                val inBrowser = currentForegroundPackage() in setOf("com.android.chrome", "com.google.android.googlequicksearchbox")
+                if (!inBrowser) {
+                    mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
+                    val launched = ensureAppOpen("com.google.android.googlequicksearchbox")
+                    if (!launched) {
+                        speakAndFinish("error", replyLanguage)
+                        return
+                    }
+                    Thread.sleep(APP_LAUNCH_DELAY_MS)
+                }
+            }
+
+            var previousAction: Action? = null
+            var previousSignature: String? = null
+            var repeatedFailCount = 0
+            var lastAttemptedTarget: String? = null
+
+            for (step in 1..MAX_STEPS) {
+                Log.d(TAG, "===== STEP $step =====")
                 mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
-                val launched = ensureAppOpen(targetPackage)
-                Log.d(TAG, "ensureAppOpen($targetPackage) = $launched")
-                if (!launched) {
-                    speakAndFinish("error", replyLanguage)
-                    return
-                }
-                Thread.sleep(APP_LAUNCH_DELAY_MS)
-            } else {
-                // Already in the app. Only back out if there's evidence we're on a
-                // nested screen (contact profile, etc.) - blindly backing out from
-                // the chat list itself exits the app entirely.
-                val currentElements = collectScreenElements()
-                val looksLikeNestedScreen = currentElements.any {
-                    val d = (it.contentDescription ?: "").lowercase()
-                    d.contains("voice call") || d.contains("video call") ||
-                            d.contains("media, links") || d.contains("more options")
-                }
-                if (looksLikeNestedScreen) {
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    Thread.sleep(400)
-                }
-            }
-        }
 
-        if (parsed.intent == "search") {
-            val inBrowser = currentForegroundPackage() in setOf("com.android.chrome", "com.google.android.googlequicksearchbox")
-            if (!inBrowser) {
-                mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
-                val launched = ensureAppOpen("com.google.android.googlequicksearchbox")
-                if (!launched) {
-                    speakAndFinish("error", replyLanguage)
-                    return
-                }
-                Thread.sleep(APP_LAUNCH_DELAY_MS)
-            }
-        }
+                val elements = collectScreenElements()
+                val signature = computeSignature(elements)
+                val screenChanged = previousSignature != null && signature != previousSignature
 
-        var previousAction: Action? = null
-        var previousSignature: String? = null
-        var repeatedFailCount = 0
-        var lastAttemptedTarget: String? = null
+                Log.d(TAG, "Collected ${elements.size} elements, changed=$screenChanged")
 
-        for (step in 1..MAX_STEPS) {
-            Log.d(TAG, "===== STEP $step =====")
-            mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
-
-            val elements = collectScreenElements()
-            val signature = computeSignature(elements)
-            val screenChanged = previousSignature != null && signature != previousSignature
-
-            Log.d(TAG, "Collected ${elements.size} elements, changed=$screenChanged")
-
-            if (isGoalAchieved(parsed, elements, previousAction, screenChanged)) {
-                Log.d(TAG, "Goal achieved")
-                speakAndFinish("done", replyLanguage)
-                return
-            }
-
-            val currentTargetKey = "${parsed.intent}:${parsed.target}"
-            if (previousAction != null && !screenChanged && lastAttemptedTarget == currentTargetKey) {
-                repeatedFailCount++
-            } else {
-                repeatedFailCount = 0
-            }
-            lastAttemptedTarget = currentTargetKey
-
-            if (repeatedFailCount >= 2) {
-                Log.d(TAG, "Same action attempted repeatedly with no screen change - escalating to ask_user")
-                speakAndFinish("need_help", replyLanguage, overrideStatus = "I tried a couple of times but nothing changed - can you help me out?")
-                return
-            }
-
-            if (isGoalAchieved(parsed, elements, previousAction, screenChanged)) {
-                Log.d(TAG, "Goal achieved")
-                speakAndFinish("done", replyLanguage)
-                return
-            }
-
-            // If the last action was supposed to change the screen but
-            // visibly didn't, on-device heuristics already failed once this
-            // round - skip straight to the VLM instead of repeating the
-            // same guess.
-            val lastActionHadNoEffect = previousAction != null &&
-                    previousAction.type in setOf(
-                ActionType.TAP, ActionType.TAP_THEN_TYPE, ActionType.SWIPE, ActionType.TYPE
-            ) && !screenChanged
-
-            val decision: Action? =
-                if (!lastActionHadNoEffect) decideWithAndroidOnly(parsed, elements) else null
-
-            Log.d(TAG, "Android decision: ${decision?.type} conf=${decision?.confidence} reason=${decision?.reason ?: "skipped (last action had no effect)"}")
-
-            if (decision != null && decision.confidence >= CONFIDENCE_FLOOR) {
-                Log.d(TAG, "Android decision: ${decision.type} conf=${decision.confidence} reason=${decision.reason}")
-
-                val executed = executeAction(decision, elements)
-                Log.d(TAG, "Android executed = $executed")
-
-                if (executed) {
-                    previousAction = decision
-                    previousSignature = signature
-                    Thread.sleep(STEP_DELAY_MS)
-                    continue
-                }
-                Log.d(TAG, "Android execution failed, falling back to VLM")
-            }
-
-            // ---- VLM fallback ----
-            mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("thinking", replyLanguage)) }
-
-            hideOverlayForScreenshot()
-            val screenshotBytes = captureScreenJpegBytes()
-            mainHandler.post { overlayView?.visibility = View.VISIBLE }
-
-            if (screenshotBytes == null) {
-                Log.e(TAG, "Screenshot capture failed")
-                break
-            }
-
-            val result = ApiClient.analyzeScreen(
-                command = command,
-                screenshotBytes = screenshotBytes,
-                screenElementsJson = elementsToJson(elements, parsed),
-                parsedIntent = parsed.intent,
-                parsedTarget = parsed.target,
-                androidUncertainty = decision?.reason ?: "no confident android decision",
-                previousAction = previousAction?.type?.name?.lowercase(),
-                replyLanguage = replyLanguage
-            )
-
-            when (result) {
-                is ApiClient.AnalyzeResult.NetworkError -> {
-                    Log.e(TAG, "Network error: ${result.message}")
-                    speakAndFinish("error", replyLanguage, overrideStatus = "Backend unreachable")
+                if (isGoalAchieved(parsed, elements, previousAction, screenChanged)) {
+                    Log.d(TAG, "Goal achieved")
+                    speakAndFinish("done", replyLanguage)
                     return
                 }
 
-                is ApiClient.AnalyzeResult.ServerError -> {
-                    Log.e(TAG, "Server error ${result.code}: ${result.body}")
+                val currentTargetKey = "${parsed.intent}:${parsed.target}"
+                if (previousAction != null && !screenChanged && lastAttemptedTarget == currentTargetKey) {
+                    repeatedFailCount++
+                } else {
+                    repeatedFailCount = 0
+                }
+                lastAttemptedTarget = currentTargetKey
+
+                if (repeatedFailCount >= 2) {
+                    Log.d(TAG, "Same action attempted repeatedly with no screen change - escalating to ask_user")
+                    speakAndFinish("need_help", replyLanguage, overrideStatus = "I tried a couple of times but nothing changed - can you help me out?")
+                    return
+                }
+
+                // If the last action was supposed to change the screen but
+                // visibly didn't, on-device heuristics already failed once this
+                // round - skip straight to the VLM instead of repeating the
+                // same guess.
+                val lastActionHadNoEffect = previousAction != null &&
+                        previousAction.type in setOf(
+                    ActionType.TAP, ActionType.TAP_THEN_TYPE, ActionType.SWIPE, ActionType.TYPE
+                ) && !screenChanged
+
+                val decision: Action? =
+                    if (!lastActionHadNoEffect) decideWithAndroidOnly(parsed, elements) else null
+
+                Log.d(TAG, "Android decision: ${decision?.type} conf=${decision?.confidence} reason=${decision?.reason ?: "skipped (last action had no effect)"}")
+
+                if (decision != null && decision.confidence >= CONFIDENCE_FLOOR) {
+                    val executed = executeAction(decision, elements, pressEnter = parsed.intent == "search")
+                    Log.d(TAG, "Android executed = $executed")
+
+                    if (executed) {
+                        // type_and_send is done the moment the send tap fires -
+                        // don't let the loop re-check and re-send.
+                        if (parsed.intent == "type_and_send" && decision.type == ActionType.TAP) {
+                            Log.d(TAG, "type_and_send: message sent, finishing")
+                            speakAndFinish("done", replyLanguage)
+                            return
+                        }
+
+                        previousAction = decision
+                        previousSignature = signature
+                        Thread.sleep(STEP_DELAY_MS)
+                        continue
+                    }
+                    Log.d(TAG, "Android execution failed, falling back to VLM")
+                }
+
+                // ---- VLM fallback ----
+                mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("thinking", replyLanguage)) }
+
+                hideOverlayForScreenshot()
+                val screenshotBytes = captureScreenJpegBytes()
+                mainHandler.post { overlayView?.visibility = View.VISIBLE }
+
+                if (screenshotBytes == null) {
+                    Log.e(TAG, "Screenshot capture failed")
                     break
                 }
 
-                is ApiClient.AnalyzeResult.Success -> {
-                    val vlmAction = parseVlmAction(result.json, elements)
+                val result = ApiClient.analyzeScreen(
+                    command = command,
+                    screenshotBytes = screenshotBytes,
+                    screenElementsJson = elementsToJson(elements, parsed),
+                    parsedIntent = parsed.intent,
+                    parsedTarget = parsed.target,
+                    androidUncertainty = decision?.reason ?: "no confident android decision",
+                    previousAction = previousAction?.type?.name?.lowercase(),
+                    replyLanguage = replyLanguage
+                )
 
-                    if (vlmAction == null) {
-                        Log.e(TAG, "Could not parse VLM response")
-                        break
-                    }
-
-                    if (vlmAction.type == ActionType.ASK_USER) {
-                        val msg = vlmAction.userMessage
-                            ?: VoiceLanguageManager.message("need_help", replyLanguage, vlmAction.reason)
-                        showOverlayWithStatus(msg)
-                        ghostTts?.speak(msg, replyLanguage)
-                        showButtonAgain()
+                when (result) {
+                    is ApiClient.AnalyzeResult.NetworkError -> {
+                        Log.e(TAG, "Network error: ${result.message}")
+                        speakAndFinish("error", replyLanguage, overrideStatus = "Backend unreachable")
                         return
                     }
 
-                    if (vlmAction.type == ActionType.DONE) {
-                        speakAndFinish("done", replyLanguage)
-                        return
-                    }
-
-                    val executed = executeAction(vlmAction, elements)
-                    Log.d(TAG, "VLM executed = $executed")
-
-                    if (!executed) {
-                        Log.e(TAG, "VLM action failed to execute")
+                    is ApiClient.AnalyzeResult.ServerError -> {
+                        Log.e(TAG, "Server error ${result.code}: ${result.body}")
                         break
                     }
 
-                    previousAction = vlmAction
-                    previousSignature = signature
-                    Thread.sleep(STEP_DELAY_MS)
+                    is ApiClient.AnalyzeResult.Success -> {
+                        val vlmAction = parseVlmAction(result.json, elements)
+
+                        if (vlmAction == null) {
+                            Log.e(TAG, "Could not parse VLM response")
+                            break
+                        }
+
+                        if (vlmAction.type == ActionType.ASK_USER) {
+                            val msg = vlmAction.userMessage
+                                ?: VoiceLanguageManager.message("need_help", replyLanguage, vlmAction.reason)
+                            showOverlayWithStatus(msg)
+                            ghostTts?.speak(msg, replyLanguage)
+                            showButtonAgain()
+                            return
+                        }
+
+                        if (vlmAction.type == ActionType.DONE) {
+                            speakAndFinish("done", replyLanguage)
+                            return
+                        }
+
+                        val executed = executeAction(vlmAction, elements, pressEnter = parsed.intent == "search")
+                        Log.d(TAG, "VLM executed = $executed")
+
+                        if (!executed) {
+                            Log.e(TAG, "VLM action failed to execute")
+                            break
+                        }
+
+                        if (parsed.intent == "type_and_send" && vlmAction.type == ActionType.TAP) {
+                            Log.d(TAG, "type_and_send: message sent (vlm), finishing")
+                            speakAndFinish("done", replyLanguage)
+                            return
+                        }
+
+                        previousAction = vlmAction
+                        previousSignature = signature
+                        Thread.sleep(STEP_DELAY_MS)
+                    }
                 }
             }
-        }
 
-        Log.e(TAG, "Vision loop exited after reaching max steps or failure")
-        speakAndFinish("error", replyLanguage)
+            Log.e(TAG, "Vision loop exited after reaching max steps or failure")
+            speakAndFinish("error", replyLanguage)
     }
-
-    // -----------------------------------------------------------------
+        // -----------------------------------------------------------------
     // Android-only decision engine
     // -----------------------------------------------------------------
 
@@ -822,7 +836,8 @@ class GhostAccessibilityService : AccessibilityService() {
     // Single unified executor
     // -----------------------------------------------------------------
 
-    private fun executeAction(action: Action, elements: List<UiElement>): Boolean {
+
+    private fun executeAction(action: Action, elements: List<UiElement>, pressEnter: Boolean = false): Boolean {
         Log.d(TAG, "Executing ${action.type} source=${action.source}")
 
         return when (action.type) {
