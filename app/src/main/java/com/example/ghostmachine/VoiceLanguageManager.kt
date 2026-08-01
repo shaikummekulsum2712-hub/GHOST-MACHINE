@@ -171,32 +171,24 @@ object VoiceLanguageManager {
 
     fun parseNormalizedCommand(command: String): Pair<String, String> {
         val lower = command.lowercase().trim()
-
-        // Compound pattern: "type X and send it" / "type X and send"
-        val typeSendRegex = Regex("^type (.+?) and send( it)?$")
-        typeSendRegex.find(lower)?.let { match ->
-            val message = match.groupValues[1].trim()
-            if (message.isNotBlank()) return "type_and_send" to message
-        }
-
         val tokens = lower.split(Regex("\\s+")).filter { it.isNotBlank() }
 
-        // Fixed-phrase intents that don't take a free-text target - keep these
-        // as plain checks since there's nothing to extract.
         when {
             lower.contains("scroll down") || lower.contains("swipe down") -> return "scroll" to "down"
             lower.contains("scroll up") || lower.contains("swipe up") -> return "scroll" to "up"
+            lower.contains("scroll left") || lower.contains("swipe left") -> return "scroll" to "left"
+            lower.contains("scroll right") || lower.contains("swipe right") -> return "scroll" to "right"
             lower.contains("go back") || lower == "back" -> return "back" to ""
-            lower == "home" -> return "home" to ""
+            lower == "home" || lower.contains("go home") || lower.contains("home screen") -> return "home" to ""
             lower == "stop" || lower == "cancel" -> return "stop" to ""
         }
 
-        if (lower == "send" || lower == "send it" || lower == "send the message" || lower.contains("send message")) {
-            return "send" to ""
+        val callRegex = Regex("^call (.+)$")
+        callRegex.find(lower)?.let { match ->
+            val contact = match.groupValues[1].trim()
+            if (contact.isNotBlank()) return "call" to contact
         }
 
-        // Trigger-word intents, checked in priority order. First one whose
-        // trigger word appears anywhere in the command wins.
         for (spec in intentSpecs) {
             if (tokens.any { it in spec.triggerWords }) {
                 val target = tokens.filterNot { it in spec.fillerWords }

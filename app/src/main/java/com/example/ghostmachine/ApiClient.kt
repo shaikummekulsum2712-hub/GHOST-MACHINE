@@ -14,7 +14,7 @@ object ApiClient {
 
     // Phone -> laptop, over wifi. Must be the laptop's LAN IP, not 127.0.0.1.
     // Backend must be started with --host 0.0.0.0.
-    private const val BASE_URL = "http://192.168.1.6:8000"
+    private const val BASE_URL = "http://192.168.1.7:8000"
 
     sealed class AnalyzeResult {
         data class Success(val json: String) : AnalyzeResult()

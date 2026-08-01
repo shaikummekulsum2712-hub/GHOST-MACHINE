@@ -10,10 +10,12 @@ def build_vision_prompt(
     elements_text = screen_elements_json or "[]"
     language = reply_language or "english"
 
-    return f"""
+    prompt = f"""
 /no_think
 
-You are selecting ONE next Android action.
+You are selecting ONE next Android action. Work through the steps below in
+order and stop at the first one that applies. Do not restate the UI elements
+list back to yourself - just apply the steps silently and output the result.
 
 User command:
 {command}
@@ -52,6 +54,31 @@ The screenshot is divided into 10 columns A-J and 10 rows 1-10.
 Use grid_cell only if no element_id is suitable.
 Example: A1 is top-left, J10 is bottom-right.
 
+Decision procedure - apply in order:
+1. LITERAL MATCH: Does any element's text or description contain the exact
+   words from the target? If yes, use that element.
+2. FUNCTIONAL MATCH: If the command describes an action rather than naming
+   visible text (e.g. "flip the camera", "mute the call", "close this"),
+   the target element usually will NOT contain those exact words. Instead
+   search descriptions for functional synonyms: flip/switch/toggle/rotate
+   for camera or mode controls, mute/silence for audio, close/dismiss/back
+   for closing, etc. Prefer small icon-only elements near the top or bottom
+   of the screen for this kind of control - they are rarely labeled with
+   the same word the user said.
+3. NAME/FUZZY MATCH: If searching for a person's name and no element
+   matches exactly, check for a partial or phonetically similar match
+   (e.g. "aashi" could match "Aashi", "Ashi", "Asiya" - use judgement, but
+   do not guess wildly between unrelated names).
+4. NOT FOUND: If after steps 1-3 nothing plausible exists on this screen,
+   output action "ask_user" - do not pick a random element or the closest
+   textual coincidence just to produce an answer.
+
+If this is a retry after a previous attempt failed to decide: commit to
+your single best candidate now rather than re-deriving the same comparison
+again. If genuinely torn between two elements, pick the one that is
+clickable and prefer smaller icon controls over large text labels or
+preview/status elements for functional commands like "flip camera".
+
 Rules:
 1. Prefer element_id from UI elements.
 2. If no element_id matches, use grid_cell.
@@ -66,6 +93,7 @@ Rules:
 11. Return valid raw JSON only.
 12. No markdown. No explanation.
 13. target_text is REQUIRED whenever action is "tap". Always include it.
+14. Do not describe your reasoning in the output - only the final JSON.
 
 JSON format:
 {{
@@ -83,5 +111,4 @@ JSON format:
   "confidence": number
 }}
 """
-
     return prompt.strip()
