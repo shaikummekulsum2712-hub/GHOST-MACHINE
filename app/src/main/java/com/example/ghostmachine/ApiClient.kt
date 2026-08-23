@@ -6,6 +6,7 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
 object ApiClient {
@@ -14,7 +15,7 @@ object ApiClient {
 
     // Phone -> laptop, over wifi. Must be the laptop's LAN IP, not 127.0.0.1.
     // Backend must be started with --host 0.0.0.0.
-    private const val BASE_URL = "http://192.168.1.7:8000"
+    private const val BASE_URL = "http://192.168.1.8:8000"
 
     sealed class AnalyzeResult {
         data class Success(val json: String) : AnalyzeResult()
@@ -22,12 +23,49 @@ object ApiClient {
         data class NetworkError(val message: String) : AnalyzeResult()
     }
 
+    data class PlannedStep(val intent: String, val target: String)
+
+    sealed class PlanResult {
+        data class Success(val steps: List<PlannedStep>) : PlanResult()
+        object Failure : PlanResult()
+    }
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(180, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    fun planCommand(command: String, replyLanguage: String): PlanResult {
+        return try {
+            val json = JSONObject().apply {
+                put("command", command)
+                put("reply_language", replyLanguage)
+            }
+
+            val body = json.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("$BASE_URL/plan-command")
+                .post(body)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return PlanResult.Failure
+                val bodyText = response.body?.string() ?: return PlanResult.Failure
+
+                val obj = JSONObject(bodyText)
+                val stepsArray = obj.getJSONArray("steps")
+                val steps = mutableListOf<PlannedStep>()
+                for (i in 0 until stepsArray.length()) {
+                    val stepObj = stepsArray.getJSONObject(i)
+                    steps.add(PlannedStep(stepObj.getString("intent"), stepObj.getString("target")))
+                }
+                PlanResult.Success(steps)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "planCommand failed", e)
+            PlanResult.Failure
+        }
+    }
     fun analyzeScreen(
         command: String,
         screenshotBytes: ByteArray,

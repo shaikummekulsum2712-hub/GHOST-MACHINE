@@ -59,6 +59,12 @@ class GhostAccessibilityService : AccessibilityService() {
 
     private var speechRecognizer: SpeechRecognizer? = null
 
+    sealed class StepResult {
+        object Done : StepResult()
+        data class NeedsHelp(val message: String) : StepResult()
+        object Error : StepResult()
+    }
+
     // -----------------------------------------------------------------
     // Data model
     // -----------------------------------------------------------------
@@ -371,9 +377,14 @@ class GhostAccessibilityService : AccessibilityService() {
 
         Thread {
             try {
-                Log.d(TAG, "Vision loop started")
-                runVisionLoop(voiceContext.normalizedCommand, parsed, currentReplyLanguage)
-                Log.d(TAG, "Vision loop finished")
+                if (looksCompound(voiceContext.normalizedCommand)) {
+                    when (val plan = ApiClient.planCommand(voiceContext.normalizedCommand, currentReplyLanguage)) {
+                        is ApiClient.PlanResult.Success -> runMultiStepCommand(plan.steps, currentReplyLanguage)
+                        is ApiClient.PlanResult.Failure -> runVisionLoop(voiceContext.normalizedCommand, parsed, currentReplyLanguage)
+                    }
+                } else {
+                    runVisionLoop(voiceContext.normalizedCommand, parsed, currentReplyLanguage)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Vision loop crashed", e)
                 speakAndFinish("error", currentReplyLanguage)
@@ -383,6 +394,10 @@ class GhostAccessibilityService : AccessibilityService() {
         }.start()
     }
 
+    private fun looksCompound(command: String): Boolean {
+        val lower = command.lowercase()
+        return lower.contains(" and ") || lower.contains(" then ") || lower.contains(", then")
+    }
     // -----------------------------------------------------------------
     // Direct app-open shortcuts (single-shot, no follow-up UI interaction)
     // -----------------------------------------------------------------
@@ -504,18 +519,40 @@ class GhostAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun runMultiStepCommand(steps: List<ApiClient.PlannedStep>, replyLanguage: String) {
+        for ((index, step) in steps.withIndex()) {
+            val parsed = ParsedCommand(step.intent, step.target)
+            val isLast = index == steps.lastIndex
 
+            Log.d(TAG, "Multi-step ${index + 1}/${steps.size}: ${step.intent} -> ${step.target}")
+            mainHandler.post { setOverlayStatus("Step ${index + 1}/${steps.size}: ${step.intent}") }
 
-    private fun runVisionLoop(command: String, parsed: ParsedCommand, replyLanguage: String) {
+            val result = runVisionLoop(step.target, parsed, replyLanguage, speakOnSuccess = isLast)
+
+            when (result) {
+                is StepResult.Done -> continue
+                is StepResult.NeedsHelp, is StepResult.Error -> {
+                    Log.d(TAG, "Multi-step chain stopped at step ${index + 1}")
+                    return
+                }
+            }
+        }
+    }
+
+    private fun runVisionLoop(
+        command: String,
+        parsed: ParsedCommand,
+        replyLanguage: String,
+        speakOnSuccess: Boolean = true
+    ): StepResult {
         Log.d(TAG, "==============================")
         Log.d(TAG, "NEW COMMAND: $command | intent=${parsed.intent} target=${parsed.target}")
         Log.d(TAG, "==============================")
 
         if (parsed.intent in setOf("search", "type", "type_and_send") && parsed.target.isBlank()) {
             speakAndFinish("need_help", replyLanguage, overrideStatus = "What would you like me to say or search for?")
-            return
+            return StepResult.NeedsHelp("blank target")
         }
-
 
         if (parsed.intent == "call") {
             val targetPackage = resolveCallAppPackage()
@@ -524,7 +561,7 @@ class GhostAccessibilityService : AccessibilityService() {
                 val launched = ensureAppOpen(targetPackage)
                 if (!launched) {
                     speakAndFinish("error", replyLanguage)
-                    return
+                    return StepResult.Error
                 }
                 Thread.sleep(APP_LAUNCH_DELAY_MS)
             }
@@ -532,13 +569,16 @@ class GhostAccessibilityService : AccessibilityService() {
 
         if (parsed.intent == "open_chat") {
             val targetPackage = resolveChatAppPackage()
-            if (currentForegroundPackage() != targetPackage) {
+            val currentElements = collectScreenElements()
+            val alreadyAchievable = isGoalAchieved(parsed, currentElements, null, false) ||
+                    currentForegroundPackage() == targetPackage
+
+            if (!alreadyAchievable) {
                 mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
                 val launched = ensureAppOpen(targetPackage)
-                Log.d(TAG, "ensureAppOpen($targetPackage) = $launched")
                 if (!launched) {
                     speakAndFinish("error", replyLanguage)
-                    return
+                    return StepResult.Error
                 }
                 Thread.sleep(APP_LAUNCH_DELAY_MS)
             }
@@ -549,16 +589,19 @@ class GhostAccessibilityService : AccessibilityService() {
         // of forcing Google - decideWithAndroidOnly's "search" branch looks at
         // whatever screen is currently in front of it.
         if (parsed.intent == "search") {
-            val foregroundPkg = currentForegroundPackage()
-            val isOnHomeScreen = foregroundPkg == null ||
-                    foregroundPkg.contains("launcher") || foregroundPkg.contains("home")
+            val currentElements = collectScreenElements()
+            val hasSearchableField = currentElements.any {
+                val t = (it.text ?: "").lowercase()
+                val d = (it.contentDescription ?: "").lowercase()
+                it.editable || t.contains("search") || d.contains("search")
+            }
 
-            if (isOnHomeScreen) {
+            if (!hasSearchableField) {
                 mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
                 val launched = ensureAppOpen("com.google.android.googlequicksearchbox")
                 if (!launched) {
                     speakAndFinish("error", replyLanguage)
-                    return
+                    return StepResult.Error
                 }
                 Thread.sleep(APP_LAUNCH_DELAY_MS)
             }
@@ -581,8 +624,12 @@ class GhostAccessibilityService : AccessibilityService() {
 
             if (isGoalAchieved(parsed, elements, previousAction, screenChanged)) {
                 Log.d(TAG, "Goal achieved")
-                speakAndFinish("done", replyLanguage)
-                return
+                if (speakOnSuccess) {
+                    speakAndFinish("done", replyLanguage)
+                } else {
+                    mainHandler.post { setOverlayStatus("Step done") }
+                }
+                return StepResult.Done
             }
 
             val currentTargetKey = "${parsed.intent}:${parsed.target}"
@@ -596,7 +643,7 @@ class GhostAccessibilityService : AccessibilityService() {
             if (repeatedFailCount >= 2) {
                 Log.d(TAG, "Same action attempted repeatedly with no screen change - escalating to ask_user")
                 speakAndFinish("need_help", replyLanguage, overrideStatus = "I tried a couple of times but nothing changed - can you help me out?")
-                return
+                return StepResult.NeedsHelp("stalled")
             }
 
             val lastActionHadNoEffect = previousAction != null &&
@@ -616,8 +663,8 @@ class GhostAccessibilityService : AccessibilityService() {
                 if (executed) {
                     if (parsed.intent == "type_and_send" && decision.type == ActionType.TAP) {
                         Log.d(TAG, "type_and_send: message sent, finishing")
-                        speakAndFinish("done", replyLanguage)
-                        return
+                        if (speakOnSuccess) speakAndFinish("done", replyLanguage)
+                        return StepResult.Done
                     }
                     previousAction = decision
                     previousSignature = signature
@@ -653,7 +700,7 @@ class GhostAccessibilityService : AccessibilityService() {
                 is ApiClient.AnalyzeResult.NetworkError -> {
                     Log.e(TAG, "Network error: ${result.message}")
                     speakAndFinish("error", replyLanguage, overrideStatus = "Backend unreachable")
-                    return
+                    return StepResult.Error
                 }
                 is ApiClient.AnalyzeResult.ServerError -> {
                     Log.e(TAG, "Server error ${result.code}: ${result.body}")
@@ -673,12 +720,12 @@ class GhostAccessibilityService : AccessibilityService() {
                         showOverlayWithStatus(msg)
                         ghostTts?.speak(msg, replyLanguage)
                         showButtonAgain()
-                        return
+                        return StepResult.NeedsHelp(msg)
                     }
 
                     if (vlmAction.type == ActionType.DONE) {
-                        speakAndFinish("done", replyLanguage)
-                        return
+                        if (speakOnSuccess) speakAndFinish("done", replyLanguage)
+                        return StepResult.Done
                     }
 
                     val executed = executeAction(vlmAction, elements, pressEnter = parsed.intent == "search")
@@ -691,8 +738,8 @@ class GhostAccessibilityService : AccessibilityService() {
 
                     if (parsed.intent == "type_and_send" && vlmAction.type == ActionType.TAP) {
                         Log.d(TAG, "type_and_send: message sent (vlm), finishing")
-                        speakAndFinish("done", replyLanguage)
-                        return
+                        if (speakOnSuccess) speakAndFinish("done", replyLanguage)
+                        return StepResult.Done
                     }
 
                     previousAction = vlmAction
@@ -704,6 +751,7 @@ class GhostAccessibilityService : AccessibilityService() {
 
         Log.e(TAG, "Vision loop exited after reaching max steps or failure")
         speakAndFinish("error", replyLanguage)
+        return StepResult.Error
     }
 
 

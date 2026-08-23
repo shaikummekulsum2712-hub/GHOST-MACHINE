@@ -8,6 +8,14 @@ from agent.agent_loop import get_next_action as agent_get_next_action
 from agent.action_schema import CommandRequest, ActionResponse
 from agent.safety_filter import apply_safety_filter
 
+
+from agent.planner import plan_command, PlanResponse
+from pydantic import BaseModel
+
+class PlanRequest(BaseModel):
+    command: str
+    reply_language: str = "english"
+
 CONFIDENCE_FLOOR = 0.55  # tune once you have real logs of model confidence
 
 app = FastAPI(title="Ghost Machine Backend")
@@ -42,6 +50,7 @@ def update_status(**kwargs):
 
 
 @app.get("/")
+
 def home():
     return {
         "message": "Ghost Machine backend is running",
@@ -78,6 +87,11 @@ def get_uploaded_file(filename: str):
         return {"error": "file not found"}
 
     return FileResponse(file_path)
+
+
+@app.post("/plan-command", response_model=PlanResponse)
+async def plan_command_endpoint(req: PlanRequest):
+    return plan_command(req.command, req.reply_language)
 
 
 @app.post("/next-action", response_model=ActionResponse)
