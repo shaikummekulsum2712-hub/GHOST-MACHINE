@@ -1,37 +1,23 @@
 import json
-import os
-
-import requests
-from dotenv import load_dotenv
 from pydantic import BaseModel
+from dotenv import load_dotenv
+from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
 
 load_dotenv()
 
 
-HF_TOKEN = os.getenv("HF_TOKEN")
-
-if not HF_TOKEN:
-    raise ValueError("HF_TOKEN not found in .env")
-
-
-MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
-
-HF_URL = "https://router.huggingface.co/featherless-ai/v1/chat/completions"
-
-
 ALLOWED_INTENTS = {
-    "open",
-    "open_chat",
-    "call",
-    "search",
-    "type",
-    "type_and_send",
-    "send",
-    "tap",
-    "scroll",
-    "back",
-    "home",
+    "open", "open_chat", "call", "search", "type",
+    "type_and_send", "send", "tap", "scroll", "back", "home"
 }
+
+
+llm = HuggingFaceEndpoint(
+    repo_id="MiniMaxAI/MiniMax-M2.5",
+    task="text-generation",
+)
+
+model = ChatHuggingFace(llm=llm)
 
 
 class PlannedStep(BaseModel):
@@ -45,125 +31,62 @@ class PlanResponse(BaseModel):
 
 def build_planner_prompt(command: str, reply_language: str) -> str:
     return f"""
-You are an Android command planner.
+You are an Android phone action planner.
 
-Convert the user's command into ordered actions.
+User command: "{command}"
+Reply language: {reply_language}
 
-Command: "{command}"
-Language: {reply_language}
+Break the command into the minimum number of actions needed.
 
-Allowed intents:
-open, open_chat, call, search, type, type_and_send, send, tap, scroll, back, home
+Each action must have:
+- intent: exactly one of:
+  open, open_chat, call, search, type,
+  type_and_send, send, tap, scroll, back, home
+- target: a short description of what to act on.
 
 Rules:
-1. A simple command gets exactly one step.
-2. Keep actions in the original order.
-3. "type X and send it" must use type_and_send.
-4. target must be short and plain.
-5. Return ONLY JSON.
-6. No explanation.
-7. No markdown.
+1. If the command needs only one action, return one step.
+2. Use "type_and_send" instead of separate "type" and "send".
+3. Put steps in the order a person would perform them.
+4. Return ONLY valid JSON.
+5. Do not add markdown or explanations.
 
-Example:
-
-{{
-    "steps": [
-        {{
-            "intent": "open",
-            "target": "whatsapp"
-        }}
-    ]
-}}
+Format:
+{{"steps": [{{"intent": "open", "target": "WhatsApp"}}]}}
 """
 
 
-def plan_command(
-    command: str,
-    reply_language: str = "English",
-) -> PlanResponse:
+def _clean_json(text: str) -> dict:
+    start = text.find("{")
+    end = text.find("}")
 
-    prompt = build_planner_prompt(
-        command,
-        reply_language,
-    )
+    if start == -1 or end == -1:
+        raise ValueError("No JSON object found")
 
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type": "application/json",
-    }
+    return json.loads(text[start:end + 1])
 
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
-        "temperature": 0,
-        "max_tokens": 200,
-    }
+def plan_command(command: str, reply_language: str) -> PlanResponse:
+    prompt = build_planner_prompt(command, reply_language)
 
-    try:
+    for attempt in range(2):
+        try:
+            response = model.invoke(prompt)
+            text = response.content
+            print(f"RAW PLANNER OUTPUT (attempt {attempt}):", repr(text))
 
-        response = requests.post(
-            HF_URL,
-            headers=headers,
-            json=payload,
-            timeout=60,
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        model_text = data["choices"][0]["message"]["content"]
-
-        print("Model response:", model_text)
-
-        first_brace = model_text.find("{")
-        last_brace = model_text.rfind("}")
-
-        if first_brace == -1 or last_brace == -1:
-            raise ValueError("Model did not return JSON")
-
-        clean_json = model_text[
-            first_brace:last_brace + 1
-        ]
-
-        parsed = json.loads(clean_json)
-
-        valid_steps = []
-
-        for step in parsed.get("steps", []):
-
-            intent = step.get("intent", "")
-            target = step.get("target", "")
-
-            if intent in ALLOWED_INTENTS and target:
-                valid_steps.append(
-                    PlannedStep(
-                        intent=intent,
-                        target=target,
-                    )
-                )
-
-        if not valid_steps:
-            raise ValueError("No valid steps returned")
-
-        return PlanResponse(
-            steps=valid_steps
-        )
-
-    except Exception as e:
-
-        print("Planner failed:", e)
-
-        return PlanResponse(
-            steps=[
-                PlannedStep(
-                    intent="tap",
-                    target=command,
-                )
+            data = _clean_json(text)
+            steps = [
+                PlannedStep(intent=step["intent"], target=step["target"])
+                for step in data.get("steps", [])
+                if step.get("intent") in ALLOWED_INTENTS and step.get("target")
             ]
-        )
+
+            if steps:
+                return PlanResponse(steps=steps)
+
+        except Exception as e:
+            print(f"Planner failed (attempt {attempt}):", e)
+
+    return PlanResponse(
+          steps=[PlannedStep(intent="tap", target=command)]
+          )

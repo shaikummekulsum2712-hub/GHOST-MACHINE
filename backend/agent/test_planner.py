@@ -1,17 +1,16 @@
 from agent.planner import plan_command
 
-test_commands = [
-    "open whatsapp",
-    "search for pizza places",
-    "open whatsapp and search for the family group",
-    "type hello and send it",
-    "open google and then search for ghost machine and then scroll down",
-    "call aashi",
-    "scroll down",
-]
+print("GhostMachine planner test - type a command, or 'quit' to exit.\n")
 
-for cmd in test_commands:
-    print(f"\n--- Command: {cmd} ---")
+while True:
+    cmd = input("Command: ").strip()
+    if cmd.lower() in ("quit", "exit", "q"):
+        break
+    if not cmd:
+        continue
+
     result = plan_command(cmd, "english")
-    for step in result.steps:
-        print(f"  {step.intent} -> {step.target}")
+    print(f"\n  {len(result.steps)} step(s):")
+    for i, step in enumerate(result.steps, 1):
+        print(f"  {i}. {step.intent} -> {step.target}")
+    print()

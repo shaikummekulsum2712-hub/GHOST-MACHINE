@@ -556,13 +556,26 @@ class GhostAccessibilityService : AccessibilityService() {
 
         if (parsed.intent == "call") {
             val targetPackage = resolveCallAppPackage()
-            if (currentForegroundPackage() != targetPackage) {
+            val currentElements = collectScreenElements()
+            val alreadyAchievable = isGoalAchieved(parsed, currentElements, null, false) ||
+                    currentForegroundPackage() == targetPackage
+
+            if (!alreadyAchievable) {
                 mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
                 val launched = ensureAppOpen(targetPackage)
-                if (!launched) {
-                    speakAndFinish("error", replyLanguage)
-                    return StepResult.Error
-                }
+                if (!launched) { speakAndFinish("error", replyLanguage); return StepResult.Error }
+                Thread.sleep(APP_LAUNCH_DELAY_MS)
+            }
+        }
+
+        if (parsed.intent == "open") {
+            val resolvedPackage = knownApps.entries.firstOrNull { (name, _) -> parsed.target.lowercase().contains(name) }?.value
+                ?: findPackageByAppName(parsed.target)
+
+            if (resolvedPackage != null && currentForegroundPackage() != resolvedPackage) {
+                mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
+                val launched = ensureAppOpen(resolvedPackage)
+                if (!launched) { speakAndFinish("error", replyLanguage); return StepResult.Error }
                 Thread.sleep(APP_LAUNCH_DELAY_MS)
             }
         }
