@@ -332,6 +332,9 @@ class GhostAccessibilityService : AccessibilityService() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2000)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 3000)
         }
 
         try {
@@ -378,6 +381,7 @@ class GhostAccessibilityService : AccessibilityService() {
         Thread {
             try {
                 if (looksCompound(voiceContext.normalizedCommand)) {
+                    Log.d(TAG, "normalizedCommand for compound check: ${voiceContext.normalizedCommand}")
                     when (val plan = ApiClient.planCommand(voiceContext.normalizedCommand, currentReplyLanguage)) {
                         is ApiClient.PlanResult.Success -> runMultiStepCommand(plan.steps, currentReplyLanguage)
                         is ApiClient.PlanResult.Failure -> runVisionLoop(voiceContext.normalizedCommand, parsed, currentReplyLanguage)
@@ -396,7 +400,24 @@ class GhostAccessibilityService : AccessibilityService() {
 
     private fun looksCompound(command: String): Boolean {
         val lower = command.lowercase()
-        return lower.contains(" and ") || lower.contains(" then ") || lower.contains(", then")
+
+        // Explicit multi-part phrasing
+        val hasConjunction = lower.contains(" and ") ||
+                lower.contains(" then ") ||
+                lower.contains(", then")
+
+        // Judgment/browsing phrasing that implies multiple real-world steps
+        // even without an explicit "and"/"then" - e.g. "find me the best
+        // shoes under 500" genuinely requires open -> search -> pick, but
+        // never says "and".
+        val judgmentPhrases = listOf(
+            "find me", "find the best", "best pair", "best price",
+            "show me", "compare", "which one is better", "cheapest",
+            "recommend", "look for", "search and", "browse"
+        )
+        val hasJudgmentPhrase = judgmentPhrases.any { lower.contains(it) }
+
+        return hasConjunction || hasJudgmentPhrase
     }
     // -----------------------------------------------------------------
     // Direct app-open shortcuts (single-shot, no follow-up UI interaction)
@@ -505,10 +526,16 @@ class GhostAccessibilityService : AccessibilityService() {
             if (imeSuccess) return true
         }
 
+        // Fallback: some apps don't support IME_ENTER, and their submit
+        // button might not literally say "search" - broaden what we accept.
         val elements = collectScreenElements()
         val searchButton = elements.firstOrNull {
             val d = (it.contentDescription ?: "").lowercase()
-            it.clickable && (d == "search" || d.contains("search") || d.contains("go"))
+            it.clickable && (
+                    d.contains("search") || d.contains("go") ||
+                            d.contains("submit") || d.contains("enter") ||
+                            d.contains("find") || d == "" && it.clickable // icon-only buttons often have empty description
+                    )
         }
 
         return if (searchButton != null) {
@@ -603,19 +630,20 @@ class GhostAccessibilityService : AccessibilityService() {
         // whatever screen is currently in front of it.
         if (parsed.intent == "search") {
             val currentElements = collectScreenElements()
+            Log.d(TAG, "Search precondition elements: ${currentElements.map { "t='${it.text}' d='${it.contentDescription}' editable=${it.editable} clickable=${it.clickable}" }}")
             val hasSearchableField = currentElements.any {
                 val t = (it.text ?: "").lowercase()
                 val d = (it.contentDescription ?: "").lowercase()
-                it.editable || t.contains("search") || d.contains("search")
+                val isAppSearch = d.contains("apps") || d.contains("play store") ||
+                        d.contains("games") || t.contains("apps & games")
+
+                !isAppSearch && (it.editable || t.contains("search") || d.contains("search"))
             }
 
             if (!hasSearchableField) {
                 mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
                 val launched = ensureAppOpen("com.google.android.googlequicksearchbox")
-                if (!launched) {
-                    speakAndFinish("error", replyLanguage)
-                    return StepResult.Error
-                }
+                if (!launched) { speakAndFinish("error", replyLanguage); return StepResult.Error }
                 Thread.sleep(APP_LAUNCH_DELAY_MS)
             }
         }
@@ -789,12 +817,17 @@ class GhostAccessibilityService : AccessibilityService() {
             }
 
             "search" -> {
-                // Search whatever screen is currently in front - runVisionLoop
-                // already decided whether Google needed to be launched first.
+                // Search whatever screen is currently in front - but explicitly
+                // exclude app-drawer / Play Store style search fields, since those
+                // search installed apps, not the web, and would silently hijack a
+                // real web search if left on screen from an earlier command.
                 val searchMatches = elements.filter {
                     val t = (it.text ?: "").lowercase()
                     val d = (it.contentDescription ?: "").lowercase()
-                    it.editable || t.contains("search") || d.contains("search")
+                    val isAppSearch = d.contains("apps") || d.contains("play store") ||
+                            d.contains("games") || t.contains("apps & games")
+
+                    !isAppSearch && (it.editable || t.contains("search") || d.contains("search"))
                 }
                 val editableSearch = searchMatches.firstOrNull { it.editable }
 
@@ -807,7 +840,7 @@ class GhostAccessibilityService : AccessibilityService() {
                         ActionType.TAP_THEN_TYPE, element = searchMatches.first(), text = parsed.target,
                         reason = "search element found", confidence = 0.85
                     )
-                    else -> Action(ActionType.NONE, reason = "no search field on current screen", confidence = 0.3)
+                    else -> Action(ActionType.NONE, reason = "no valid web search field on current screen", confidence = 0.3)
                 }
             }
 
@@ -865,6 +898,15 @@ class GhostAccessibilityService : AccessibilityService() {
             }
 
             "open_chat", "call" -> {
+                if (intent == "call") {
+                    val callButton = elements.firstOrNull {
+                        val d = (it.contentDescription ?: "").lowercase()
+                        it.clickable && (d.contains("call") || d == "call mobile" || d.contains("dial"))
+                    }
+                    if (callButton != null) {
+                        return Action(ActionType.TAP, element = callButton, reason = "call button found on contact page", confidence = 0.9)
+                    }
+                }
                 val directMatches = elements.filter {
                     val t = (it.text ?: "").lowercase()
                     val d = (it.contentDescription ?: "").lowercase()
@@ -897,6 +939,7 @@ class GhostAccessibilityService : AccessibilityService() {
                 } else {
                     Action(ActionType.NONE, reason = "target '$target' unclear (${directMatches.size} matches)", confidence = 0.35)
                 }
+
             }
 
             else -> Action(ActionType.NONE, reason = "unknown command", confidence = 0.2)
@@ -925,10 +968,15 @@ class GhostAccessibilityService : AccessibilityService() {
                 if (target.isBlank()) return false
                 if (currentForegroundPackage() != resolveChatAppPackage()) return false
 
-                val hasTarget = elements.any { (it.text ?: "").lowercase().contains(target) }
-                val hasMessageInput = elements.any { it.editable }  // compose box only exists inside an actual chat
+                val hasMessageInput = elements.any { it.editable }
+                val notOnSearchScreen = elements.none {
+                    val d = (it.contentDescription ?: "").lowercase()
+                    d.contains("search") && it.editable
+                }
 
-                hasTarget && hasMessageInput
+                val hasTarget = elements.any { (it.text ?: "").lowercase().contains(target) }
+
+                hasTarget && hasMessageInput && notOnSearchScreen
             }
 
             "call" -> previousAction?.type == ActionType.TAP && screenChanged
@@ -945,7 +993,16 @@ class GhostAccessibilityService : AccessibilityService() {
 
             "search" -> {
                 if (target.isBlank()) return false
-                elements.any { it.editable && (it.text ?: "").lowercase().contains(target) }
+
+                // Success looks like either: the target text is still visibly
+                // typed into a field (search just fired), OR a search/type action
+                // already ran and the screen visibly changed (results loaded) -
+                // don't keep waiting for an editable field with the exact text,
+                // since results pages often don't have one anymore.
+                val typedInField = elements.any { it.editable && (it.text ?: "").lowercase().contains(target) }
+                val searchRanAndScreenChanged = previousAction?.type in setOf(ActionType.TAP_THEN_TYPE, ActionType.TYPE) && screenChanged
+
+                typedInField || searchRanAndScreenChanged
             }
 
             "send" -> previousAction?.type == ActionType.TAP
@@ -1021,6 +1078,7 @@ class GhostAccessibilityService : AccessibilityService() {
                 Thread.sleep(700)
                 val typed = performType(text)
                 if (typed && pressEnter) performImeEnter()
+                if (typed) Thread.sleep(900)   // ADD THIS - let results/state settle before next scan
                 typed
             }
 
@@ -1229,16 +1287,21 @@ class GhostAccessibilityService : AccessibilityService() {
         val targetWords = parsed.target.lowercase().split(" ").filter { it.length > 1 }
         val intent = parsed.intent
 
+        // Never offer dead elements (not clickable, not editable) to the
+        // model - it can't interact with them, and it tends to fixate on
+        // them anyway if they textually look relevant.
+        val interactiveElements = elements.filter { it.clickable || it.editable }
+
         val candidateElements = if (intent == "open_chat" || intent == "call") {
-            elements.filterNot {
+            interactiveElements.filterNot {
                 val d = (it.contentDescription ?: "").lowercase()
                 d.contains("status") || d.contains("update") || d.contains("picture") || d.contains("photo") || d.contains("avatar")
             }
         } else {
-            elements
+            interactiveElements
         }
 
-        val ranked = elements.sortedByDescending { element ->
+        val ranked = candidateElements.sortedByDescending { element ->
             var score = 0
             val t = (element.text ?: "").lowercase()
             val d = (element.contentDescription ?: "").lowercase()

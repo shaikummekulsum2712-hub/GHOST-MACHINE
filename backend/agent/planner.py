@@ -15,6 +15,7 @@ ALLOWED_INTENTS = {
 llm = HuggingFaceEndpoint(
     repo_id="MiniMaxAI/MiniMax-M2.5",
     task="text-generation",
+    max_new_tokens=400,   # add this - the "Expecting ',' delimiter" errors suggest truncated JSON
 )
 
 model = ChatHuggingFace(llm=llm)
@@ -66,15 +67,20 @@ def _clean_json(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 def plan_command(command: str, reply_language: str) -> PlanResponse:
-    prompt = build_planner_prompt(command, reply_language)
+    base_prompt = build_planner_prompt(command, reply_language)
 
     for attempt in range(2):
         try:
+            prompt = base_prompt if attempt == 0 else (
+                base_prompt + "\n\nOutput ONLY the JSON object. No explanation, no extra text."
+            )
             response = model.invoke(prompt)
             text = response.content
+
             print(f"RAW PLANNER OUTPUT (attempt {attempt}):", repr(text))
 
             data = _clean_json(text)
+
             steps = [
                 PlannedStep(intent=step["intent"], target=step["target"])
                 for step in data.get("steps", [])
@@ -87,6 +93,4 @@ def plan_command(command: str, reply_language: str) -> PlanResponse:
         except Exception as e:
             print(f"Planner failed (attempt {attempt}):", e)
 
-    return PlanResponse(
-          steps=[PlannedStep(intent="tap", target=command)]
-          )
+    return PlanResponse(steps=[PlannedStep(intent="tap", target=command)])
