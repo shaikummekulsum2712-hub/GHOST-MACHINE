@@ -43,8 +43,25 @@ latest_status = {
     "updated_at": None,
 }
 
+# Add near your existing status state
+status_history: list[dict] = []
+MAX_HISTORY = 20
 
 def update_status(**kwargs):
+    global status_history
+    kwargs["updated_at"] = datetime.now().isoformat()
+
+    # Start a fresh timeline whenever a genuinely new command comes in
+    is_new_command = (
+        not status_history or
+        status_history[-1].get("command") != kwargs.get("command")
+    )
+    if is_new_command:
+        status_history = []
+
+    status_history.append(kwargs)
+    status_history = status_history[-MAX_HISTORY:]
+
     latest_status.update(kwargs)
     latest_status["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -71,6 +88,9 @@ def dashboard():
 def status():
     return latest_status
 
+@app.get("/status-history")
+async def get_status_history():
+    return {"steps": status_history}
 
 @app.get("/uploads/{filename}")
 def get_uploaded_file(filename: str):

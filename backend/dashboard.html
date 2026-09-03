@@ -16,14 +16,12 @@
             border-bottom: 1px solid #293244;
         }
 
-        h1 {
-            margin: 0;
-            font-size: 26px;
-        }
+        h1 { margin: 0; font-size: 26px; }
+        header p { color: #9ca3af; margin: 6px 0 0; }
 
         .container {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: 1.1fr 1fr;
             gap: 18px;
             padding: 20px;
         }
@@ -39,6 +37,8 @@
             color: #9ca3af;
             font-size: 13px;
             margin-bottom: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
 
         .value {
@@ -47,18 +47,23 @@
             word-break: break-word;
         }
 
-        .status {
+        .status-pill {
             display: inline-block;
-            padding: 8px 12px;
-            background: #1d4ed8;
+            padding: 8px 14px;
             border-radius: 999px;
             font-weight: bold;
+            font-size: 14px;
         }
+        .status-success { background: #16a34a; }
+        .status-error { background: #dc2626; }
+        .status-thinking { background: #1d4ed8; }
+        .status-idle { background: #4b5563; }
 
         img {
             max-width: 100%;
             border-radius: 12px;
             border: 1px solid #293244;
+            display: block;
         }
 
         pre {
@@ -67,72 +72,207 @@
             border-radius: 10px;
             overflow-x: auto;
             color: #d1d5db;
+            font-size: 12px;
+            max-height: 240px;
+        }
+
+        /* --- Step timeline --- */
+        .timeline {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-height: 480px;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
+        .step {
+            background: #0f1729;
+            border: 1px solid #293244;
+            border-left: 4px solid #4b5563;
+            border-radius: 10px;
+            padding: 12px 14px;
+            font-size: 13px;
+            animation: fadeIn 0.25s ease;
+        }
+        .step.source-android { border-left-color: #22c55e; }
+        .step.source-vlm { border-left-color: #a855f7; }
+        .step.status-error { border-left-color: #dc2626; }
+
+        .step-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+
+        .step-badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        .badge-android { background: #14532d; color: #86efac; }
+        .badge-vlm { background: #4c1d95; color: #d8b4fe; }
+        .badge-error { background: #7f1d1d; color: #fca5a5; }
+
+        .step-num { color: #9ca3af; font-size: 12px; }
+
+        .step-row {
+            display: flex;
+            gap: 6px;
+            margin-top: 4px;
+            color: #d1d5db;
+        }
+        .step-row .k { color: #6b7280; min-width: 78px; }
+
+        .conf-bar {
+            height: 4px;
+            background: #1f2937;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        .conf-fill { height: 100%; background: #3b82f6; transition: width 0.3s ease; }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .empty-state {
+            color: #6b7280;
+            font-style: italic;
+            font-size: 14px;
+        }
+
+        .screenshot-wrap {
+            position: relative;
+        }
+        .screenshot-tag {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            background: rgba(0,0,0,0.6);
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
         }
     </style>
 </head>
 <body>
 <header>
-    <h1>👻 Ghost Machine Dashboard</h1>
-    <p>Live backend monitor for screenshot, VLM action, reason, and confidence.</p>
+    <h1> 👻 Ghost Machine Dashboard</h1>
+    <p>Live view of the command pipeline - steps, decisions, and the screen behind them.</p>
 </header>
 
 <div class="container">
+    <!-- LEFT: command summary + step timeline -->
     <div class="card">
         <div class="label">Status</div>
-        <div class="value"><span id="status" class="status">loading</span></div>
+        <div class="value"><span id="status" class="status-pill status-idle">idle</span></div>
 
         <div class="label">Command</div>
         <div id="command" class="value">-</div>
 
-        <div class="label">Action</div>
-        <div id="action" class="value">-</div>
-
-        <div class="label">Reason</div>
-        <div id="reason" class="value">-</div>
-
-        <div class="label">Confidence</div>
-        <div id="confidence" class="value">-</div>
-
-        <div class="label">Updated At</div>
-        <div id="updated_at" class="value">-</div>
+        <div class="label">Step Timeline</div>
+        <div id="timeline" class="timeline">
+            <div class="empty-state">No steps yet - waiting for a command...</div>
+        </div>
     </div>
 
+    <!-- RIGHT: latest screenshot -->
     <div class="card">
         <div class="label">Latest Screenshot</div>
-        <img id="screenshot" src="" alt="No screenshot yet" />
+        <div class="screenshot-wrap">
+            <span id="screenshot-tag" class="screenshot-tag">-</span>
+            <img id="screenshot" src="" alt="No screenshot yet" />
+        </div>
     </div>
 
+    <!-- BOTTOM: raw JSON, full width -->
     <div class="card" style="grid-column: span 2;">
-        <div class="label">Raw Status JSON</div>
+        <div class="label">Raw Step History (JSON)</div>
         <pre id="raw_json">{}</pre>
     </div>
 </div>
 
 <script>
-    async function loadStatus() {
+    function statusClass(status) {
+        if (status === "success") return "status-success";
+        if (status === "error") return "status-error";
+        if (status === "thinking") return "status-thinking";
+        return "status-idle";
+    }
+
+    function renderStep(step, index) {
+        const source = step.source || (step.action ? "android" : "vlm");
+        const sourceClass = source === "android" ? "source-android" : "source-vlm";
+        const isError = step.status === "error" || !!step.error;
+        const badgeClass = isError ? "badge-error" : (source === "android" ? "badge-android" : "badge-vlm");
+        const badgeLabel = isError ? "error" : source;
+
+        const confidence = step.confidence !== undefined && step.confidence !== null
+            ? Math.round(step.confidence * 100)
+            : null;
+
+        return `
+            <div class="step ${sourceClass} ${isError ? 'status-error' : ''}">
+                <div class="step-top">
+                    <span class="step-badge ${badgeClass}">${badgeLabel}</span>
+                    <span class="step-num">step ${index + 1}</span>
+                </div>
+                <div class="step-row"><span class="k">action</span><span>${step.action || '-'}</span></div>
+                <div class="step-row"><span class="k">reason</span><span>${step.reason || step.error || '-'}</span></div>
+                <div class="step-row"><span class="k">target</span><span>${step.target_text || step.parsed_target || '-'}</span></div>
+                ${confidence !== null ? `
+                    <div class="step-row"><span class="k">confidence</span><span>${confidence}%</span></div>
+                    <div class="conf-bar"><div class="conf-fill" style="width:${confidence}%"></div></div>
+                ` : ''}
+            </div>
+        `;
+    }
+
+    async function loadStatusHistory() {
         try {
-            const res = await fetch("/status");
+            const res = await fetch("/status-history");
             const data = await res.json();
+            const steps = data.steps || [];
 
-            document.getElementById("status").textContent = data.status || "-";
-            document.getElementById("command").textContent = data.command || "-";
-            document.getElementById("action").textContent = data.action || "-";
-            document.getElementById("reason").textContent = data.reason || "-";
-            document.getElementById("confidence").textContent = data.confidence ?? "-";
-            document.getElementById("updated_at").textContent = data.updated_at || "-";
-            document.getElementById("raw_json").textContent = JSON.stringify(data, null, 2);
+            const latest = steps[steps.length - 1] || {};
 
-            if (data.screenshot_url) {
-                document.getElementById("screenshot").src = data.screenshot_url + "?t=" + Date.now();
+            const statusEl = document.getElementById("status");
+            statusEl.textContent = latest.status || "idle";
+            statusEl.className = "status-pill " + statusClass(latest.status);
+
+            document.getElementById("command").textContent = latest.command || "-";
+
+            const timelineEl = document.getElementById("timeline");
+            if (steps.length === 0) {
+                timelineEl.innerHTML = `<div class="empty-state">No steps yet - waiting for a command...</div>`;
+            } else {
+                // newest step at the top
+                timelineEl.innerHTML = steps.slice().reverse().map((s, i) =>
+                    renderStep(s, steps.length - 1 - i)
+                ).join("");
             }
+
+            if (latest.screenshot_url) {
+                document.getElementById("screenshot").src = latest.screenshot_url + "?t=" + Date.now();
+                document.getElementById("screenshot-tag").textContent =
+                    `step ${steps.length} / ${latest.status || ''}`;
+            }
+
+            document.getElementById("raw_json").textContent = JSON.stringify(steps, null, 2);
         } catch (err) {
             document.getElementById("status").textContent = "dashboard_error";
             document.getElementById("raw_json").textContent = err.toString();
         }
     }
 
-    loadStatus();
-    setInterval(loadStatus, 1000);
+    loadStatusHistory();
+    setInterval(loadStatusHistory, 1000);
 </script>
 </body>
 </html>

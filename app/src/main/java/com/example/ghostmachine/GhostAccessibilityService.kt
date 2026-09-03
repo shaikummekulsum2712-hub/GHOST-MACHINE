@@ -284,8 +284,20 @@ class GhostAccessibilityService : AccessibilityService() {
             }
 
             override fun onError(error: Int) {
-                Log.e(TAG, "Speech error: $error")
-                setOverlayStatus("Voice error. Try again.")
+                val errorName = when (error) {
+                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "NETWORK_TIMEOUT"
+                    SpeechRecognizer.ERROR_NETWORK -> "NETWORK"
+                    SpeechRecognizer.ERROR_AUDIO -> "AUDIO"
+                    SpeechRecognizer.ERROR_SERVER -> "SERVER"
+                    SpeechRecognizer.ERROR_CLIENT -> "CLIENT"
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "SPEECH_TIMEOUT (didn't hear anything)"
+                    SpeechRecognizer.ERROR_NO_MATCH -> "NO_MATCH (heard audio, couldn't transcribe)"
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "RECOGNIZER_BUSY"
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "INSUFFICIENT_PERMISSIONS"
+                    else -> "UNKNOWN($error)"
+                }
+                Log.e(TAG, "Speech error: $errorName")
+                setOverlayStatus("Voice error: $errorName")
             }
 
             override fun onResults(results: Bundle?) {
