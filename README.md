@@ -644,6 +644,278 @@ unless using adb reverse.
 
 ---
 
+# GhostMachine — Setup & Run Workflow
+
+This guide covers the full checklist for getting GhostMachine running from scratch on a new machine, using **VS Code + command line** (no Android Studio required). Follow it top to bottom the first time; use the [Quick Reference](#quick-reference-every-time-after-first-setup) section for every run after that.
+
+> **Branch note:** Always work on the `ghostmachine` branch, not `main`.
+> ```bash
+> git checkout ghostmachine
+> ```
+
+---
+
+## Table of Contents
+
+1. [One-Time Prerequisites](#1-one-time-prerequisites)
+2. [Machine Layout — Decide This First](#2-machine-layout--decide-this-first)
+3. [Pull the AI Models](#3-pull-the-ai-models)
+4. [Configure the Backend (`.env`)](#4-configure-the-backend-env)
+5. [Configure the Android App (`ApiClient.kt`)](#5-configure-the-android-app-apiclientkt)
+6. [Start the Servers](#6-start-the-servers)
+7. [Build and Install the App (No Android Studio)](#7-build-and-install-the-app-no-android-studio)
+8. [Enable Permissions on the Phone](#8-enable-permissions-on-the-phone)
+9. [Verify Everything Is Connected](#9-verify-everything-is-connected)
+10. [Watching Logs While Testing](#10-watching-logs-while-testing)
+11. [Quick Reference — Every Time After First Setup](#11-quick-reference--every-time-after-first-setup)
+12. [Troubleshooting Checklist](#12-troubleshooting-checklist)
+
+---
+
+## 1. One-Time Prerequisites
+
+Install these once on whichever machine will run the backend:
+
+- **Python 3.11+** and `pip`
+- **Ollama** — [ollama.com](https://ollama.com)
+- **Android SDK platform-tools** (for `adb`) — comes bundled with Android Studio, or install standalone via [developer.android.com/tools/releases/platform-tools](https://developer.android.com/tools/releases/platform-tools)
+- **Java JDK** (required by Gradle to build the app) — JDK 17 is a safe default
+- A physical Android phone, **API 30+ (Android 11 or newer)**, with **Developer Options** and **USB debugging** enabled (Settings → About Phone → tap "Build Number" 7 times → Settings → Developer Options → enable USB debugging)
+
+Confirm `adb` is reachable from a terminal:
+```bash
+adb version
+```
+If this fails, either add `platform-tools` to your system PATH, or use the full path to `adb.exe` in every command below (e.g. `C:\Users\<you>\AppData\Local\Android\Sdk\platform-tools\adb.exe`).
+
+---
+
+## 2. Machine Layout — Decide This First
+
+GhostMachine has three pieces that all need to reach each other over the network:
+
+| Piece | What it is |
+|---|---|
+| **Phone** | Runs the Android app, needs to reach the backend |
+| **Backend** | FastAPI/uvicorn server — needs to reach Ollama |
+| **Ollama** | Serves the AI models — can be local to the backend, or on a separate machine |
+
+**Simplest setup (recommended for a demo):** run the backend **and** Ollama on the same machine. The phone only needs to know that one machine's IP address.
+
+If backend and Ollama are on different machines, you'll need two IPs configured in two different places — see the notes in each config step below.
+
+---
+
+## 3. Pull the AI Models
+
+Two different models are used for two different jobs — don't reuse one for both:
+
+```bash
+# Vision model - reads screenshots, decides on-screen actions
+ollama pull qwen3-vl:2b
+
+# Planner model - splits compound voice commands into steps (text-only, no vision)
+ollama pull qwen3:14b
+```
+> If `qwen3:14b` is too large/slow for your hardware, a smaller text model like `qwen2.5:1.5b` also works — just update `OLLAMA_PLANNER_MODEL` in step 4 to match.
+
+Confirm both are present:
+```bash
+ollama list
+```
+
+---
+
+## 4. Configure the Backend (`.env`)
+
+Create or edit `backend/.env`:
+
+```env
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen3-vl:2b
+OLLAMA_PLANNER_MODEL=qwen3:14b
+PLANNER_PROVIDER=ollama
+```
+
+- Use `127.0.0.1` for `OLLAMA_BASE_URL` if Ollama runs on the **same machine** as the backend.
+- If Ollama runs on a **different machine**, replace `127.0.0.1` with that machine's LAN IP, and make sure Ollama on that machine is started with `OLLAMA_HOST=0.0.0.0:11434` so it accepts external connections (see step 6).
+
+Install backend dependencies:
+```bash
+cd backend
+pip install -r requirements.txt
+```
+
+---
+
+## 5. Configure the Android App (`ApiClient.kt`)
+
+Find the backend machine's LAN IP:
+```bash
+ipconfig        # Windows - look under "Wireless LAN adapter Wi-Fi"
+# or
+ifconfig        # macOS/Linux
+```
+
+Open `app/src/main/java/com/example/ghostmachine/ApiClient.kt` and set:
+```kotlin
+private const val BASE_URL = "http://<backend-machine-IP>:8000"
+```
+
+> **This IP changes** whenever the backend machine reconnects to WiFi (DHCP reassignment). If the phone suddenly can't reach the backend, re-check `ipconfig` first — this is the single most common cause of connection failures.
+
+---
+
+## 6. Start the Servers
+
+Open **3 terminal tabs** in VS Code (Terminal → New Terminal, then use the `+` icon for more tabs). All three must stay running simultaneously.
+
+**Terminal 1 — Ollama**
+```bash
+ollama serve
+```
+If Ollama and the backend are on different machines, set this env var first so Ollama accepts connections from outside itself:
+```bash
+# Windows PowerShell
+$env:OLLAMA_HOST="0.0.0.0:11434"
+ollama serve
+```
+
+**Terminal 2 — Backend**
+```bash
+cd backend
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+```
+Wait for:
+```
+Uvicorn running on http://0.0.0.0:8000
+```
+> Always bind to `0.0.0.0`, never to the machine's specific IP directly — binding to a specific IP can fail with `WinError 10049` depending on network adapter state.
+
+**Terminal 3 — free for adb, logs, and testing commands** (used throughout the rest of this guide).
+
+---
+
+## 7. Build and Install the App (No Android Studio)
+
+From the **project root** (not `backend`):
+
+```bash
+# Windows
+.\gradlew.bat assembleDebug
+
+# macOS/Linux
+./gradlew assembleDebug
+```
+
+Wait for `BUILD SUCCESSFUL`. The APK is now at:
+```
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+**Connect the phone via USB**, allow the "Allow USB debugging" prompt on the phone if it appears, then confirm it's detected:
+```bash
+adb devices
+```
+It should list your device as authorized (not "unauthorized" or "offline"). If it shows nothing, check the USB cable/port and that USB debugging is enabled.
+
+**Install:**
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+The `-r` flag reinstalls cleanly over any previous build — use this every time.
+
+**No USB available?** Use wireless ADB instead (needs one-time USB pairing first, Android 11+):
+```bash
+adb pair <phone-ip>:<pairing-port>   # code shown in phone: Settings > Developer Options > Wireless debugging > Pair device
+adb connect <phone-ip>:<port>
+```
+
+---
+
+## 8. Enable Permissions on the Phone
+
+1. Open the app once — grant **microphone** permission when prompted.
+2. Go to **Settings → Accessibility → GhostMachine → turn ON**.
+3. Whenever `res/xml/accessibility_service_config.xml` changes between builds, **toggle the accessibility service off and back on** — Android caches its declared capabilities at bind time and won't pick up XML changes otherwise.
+
+---
+
+## 9. Verify Everything Is Connected
+
+Before testing any voice command, confirm the chain works end-to-end:
+
+1. **Phone and backend machine are on the same WiFi network.**
+2. From the **phone's own browser**, visit:
+   ```
+   http://<backend-machine-IP>:8000/docs
+   ```
+   This should load FastAPI's interactive docs page. If it doesn't load, this is a network/firewall issue — not an app bug. Check:
+   - Windows Firewall on the backend machine allows inbound port `8000`.
+   - The backend machine's IP hasn't changed since you set `BASE_URL` (re-check `ipconfig`).
+3. Confirm both models are actually loaded and ready:
+   ```bash
+   ollama ps
+   ```
+4. **Do one throwaway voice command as a warm-up** before presenting — cold model loads can take 30–100+ seconds, and you don't want that delay happening live in front of an audience.
+
+---
+
+## 10. Watching Logs While Testing
+
+**Android-side logs** (in Terminal 3):
+```bash
+adb logcat -s GhostService:*
+```
+
+**Backend logs** are already visible directly in Terminal 2's output — watch for lines like `Command received:`, `Ollama status code:`, and `RAW PLANNER OUTPUT:`.
+
+**Dashboard** (visual view of the step timeline + screenshots): open in any browser, from any device on the same network:
+```
+http://<backend-machine-IP>:8000/dashboard.html
+```
+
+When debugging a specific failure, capture **both** the Android logcat output and the backend terminal output for the same command — the two together are what make root-causing an issue possible instead of guessing.
+
+---
+
+## 11. Quick Reference — Every Time After First Setup
+
+Once everything above has been done once, here's the repeatable cycle for making a change and testing it again:
+
+```bash
+# Terminal 1 (leave running)
+ollama serve
+
+# Terminal 2 (leave running)
+cd backend
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+# Terminal 3 - after every Android code change:
+.\gradlew.bat assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb logcat -s GhostService:*
+```
+
+If only Python files changed, uvicorn's `--reload` picks them up automatically — no restart needed. If Kotlin files changed, you must rebuild + reinstall (the two commands above) every time.
+
+---
+
+## 12. Troubleshooting Checklist
+
+Work through these in order when something isn't working — most issues tonight came down to one of these:
+
+- [ ] Is the backend machine actually connected to WiFi? (`ipconfig` — look for "Media disconnected")
+- [ ] Has the backend machine's IP changed since `ApiClient.kt` was last updated?
+- [ ] Is `ollama serve` actually running? (`ollama ps`)
+- [ ] Is uvicorn actually running, with no startup errors/tracebacks in its terminal?
+- [ ] Does `http://<backend-IP>:8000/docs` load from the **phone's** browser?
+- [ ] Is the accessibility service toggled ON, and re-toggled after any config XML change?
+- [ ] Is microphone permission granted?
+- [ ] Does `adb devices` show the phone as authorized?
+- [ ] Did you rebuild + reinstall after the last Kotlin change? (Python changes hot-reload; Kotlin changes do not.)
+- [ ] Consider setting a **DHCP reservation** for the backend machine's MAC address in your router settings — this permanently stops the IP-change issue from recurring.
+
 # 📌 Project Status
 
 This project is actively under development.
