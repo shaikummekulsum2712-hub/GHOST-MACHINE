@@ -61,41 +61,41 @@ def _clean_json(text: str) -> dict:
 # OPTION A: Ollama (local) - UNCOMMENT THIS BLOCK TO USE
 # =====================================================================
 import requests
-
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-OLLAMA_PLANNER_MODEL = os.getenv("OLLAMA_PLANNER_MODEL", "qwen2.5:1.5b")
-
-def _call_model(prompt: str) -> str:
-    url = f"{OLLAMA_BASE_URL.strip('/')}/api/chat"
-    payload = {
-        "model": OLLAMA_PLANNER_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
-        "format": "json",
-        "keep_alive": "30m",
-        "options": {"temperature": 0, "num_predict": 400, "top_k": 1, "top_p": 0.1}
-    }
-    response = requests.post(url, json=payload, timeout=90)
-    response.raise_for_status()
-    return response.json()["message"]["content"]
+#
+# OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+# OLLAMA_PLANNER_MODEL = os.getenv("OLLAMA_PLANNER_MODEL", "qwen2.5:1.5b")
+#
+# def _call_model(prompt: str) -> str:
+#     url = f"{OLLAMA_BASE_URL.strip('/')}/api/chat"
+#     payload = {
+#         "model": OLLAMA_PLANNER_MODEL,
+#         "messages": [{"role": "user", "content": prompt}],
+#         "stream": False,
+#         "format": "json",
+#         "keep_alive": "30m",
+#         "options": {"temperature": 0, "num_predict": 400, "top_k": 1, "top_p": 0.1}
+#     }
+#     response = requests.post(url, json=payload, timeout=90)
+#     response.raise_for_status()
+#     return response.json()["message"]["content"]
 
 
 # =====================================================================
 # OPTION B: Hugging Face (langchain_huggingface) - COMMENT OUT OPTION A
 # ABOVE AND UNCOMMENT THIS BLOCK TO USE INSTEAD
 # =====================================================================
-# from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
-#
-# llm = HuggingFaceEndpoint(
-#     repo_id="MiniMaxAI/MiniMax-M2.5",
-#     task="text-generation",
-#     max_new_tokens=400,
-# )
-# hf_model = ChatHuggingFace(llm=llm)
-#
-# def _call_model(prompt: str) -> str:
-#     response = hf_model.invoke(prompt)
-#     return response.content
+from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
+
+llm = HuggingFaceEndpoint(
+    repo_id="MiniMaxAI/MiniMax-M2.5",
+    task="text-generation",
+    max_new_tokens=400,
+)
+hf_model = ChatHuggingFace(llm=llm)
+
+def _call_model(prompt: str) -> str:
+    response = hf_model.invoke(prompt)
+    return response.content
 
 
 def plan_command(command: str, reply_language: str) -> PlanResponse:
