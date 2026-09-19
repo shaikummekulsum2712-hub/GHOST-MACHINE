@@ -1,4 +1,4 @@
-<![CDATA[<div align="center">
+<div align="center">
 
 # 👻 Ghost Machine
 
@@ -330,4 +330,3 @@ This project is open source and available under the [MIT License](LICENSE).
 **Built with 🤖 AI + ❤️ by the Ghost Machine team**
 
 </div>
-]]>
