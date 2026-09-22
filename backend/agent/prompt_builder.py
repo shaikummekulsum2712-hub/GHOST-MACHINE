@@ -8,14 +8,17 @@ def build_vision_prompt(
     reply_language: str | None = None
 ) -> str:
     elements_text = screen_elements_json or "[]"
-    language = reply_language or "english"
+    language = "english"
 
     prompt = f"""
 /no_think
 
-You are selecting ONE next Android action. Work through the steps below in
-order and stop at the first one that applies. Do not restate the UI elements
-list back to yourself - just apply the steps silently and output the result.
+You are selecting ONE next Android UI action.
+
+Work through the decision procedure below in order.
+Do not restate the UI elements.
+Do not explain your reasoning.
+Return only the final JSON object.
 
 User command:
 {command}
@@ -52,50 +55,83 @@ Provided image.
 Grid:
 The screenshot is divided into 10 columns A-J and 10 rows 1-10.
 Use grid_cell only if no element_id is suitable.
-Example: A1 is top-left, J10 is bottom-right.
+A1 is top-left.
+J10 is bottom-right.
 
 Decision procedure - apply in order:
-1. LITERAL MATCH: Does any element's text or description contain the exact
-   words from the target? If yes, use that element.
-2. FUNCTIONAL MATCH: If the command describes an action rather than naming
-   visible text (e.g. "flip the camera", "mute the call", "close this"),
-   the target element usually will NOT contain those exact words. Instead
-   search descriptions for functional synonyms: flip/switch/toggle/rotate
-   for camera or mode controls, mute/silence for audio, close/dismiss/back
-   for closing, etc. Prefer small icon-only elements near the top or bottom
-   of the screen for this kind of control - they are rarely labeled with
-   the same word the user said.
-3. NAME/FUZZY MATCH: If searching for a person's name and no element
-   matches exactly, check for a partial or phonetically similar match
-   (e.g. "aashi" could match "Aashi", "Ashi", "Asiya" - use judgement, but
-   do not guess wildly between unrelated names).
-4. NOT FOUND: If after steps 1-3 nothing plausible exists on this screen,
-   output action "ask_user" - do not pick a random element or the closest
-   textual coincidence just to produce an answer.
 
-If this is a retry after a previous attempt failed to decide: commit to
-your single best candidate now rather than re-deriving the same comparison
-again. If genuinely torn between two elements, pick the one that is
-clickable and prefer smaller icon controls over large text labels or
-preview/status elements for functional commands like "flip camera".
+1. LITERAL MATCH
+
+If the target corresponds to visible text or content description,
+prefer the element whose text or description most directly matches
+the target.
+
+2. FUNCTIONAL MATCH
+
+If the command describes a UI function rather than visible text,
+look for the appropriate control.
+
+Examples:
+- flip/switch camera → camera switch control
+- mute/silence → microphone or mute control
+- close/dismiss → close or dismiss control
+- back → back control
+- search → search field or search control
+- send → send control when the Android executor has already determined
+  that sending is allowed
+
+Prefer a small relevant control over unrelated large text or
+preview/status elements.
+
+3. NAME/FUZZY MATCH
+
+When looking for a person's name and there is no exact match,
+allow a reasonable partial or phonetic match.
+
+Do not make a wild guess between unrelated names.
+
+4. NOT FOUND
+
+If no plausible target or functional control exists on the current
+screen, return ask_user.
+
+Do not select a random element merely to produce an action.
+
+If this is a retry after a previous failed attempt, use the current
+screen and previous action to choose a different or better candidate
+when one exists.
+
+If genuinely uncertain between two candidates, prefer the candidate
+that is:
+- clickable when interaction is required
+- semantically closer to the command
+- a specific control rather than a status or preview element
 
 Rules:
-1. Prefer element_id from UI elements.
-2. If no element_id matches, use grid_cell.
-3. Use x/y only as last fallback.
-4. Return only ONE action.
+
+1. Prefer element_id from the UI elements.
+2. If no suitable element_id exists, use grid_cell.
+3. Use x/y only as a final fallback.
+4. Return exactly ONE action.
 5. For entering text, use action "type".
-6. For risky actions like send, pay, delete, confirm, submit, use ask_user.
-7. If action is ask_user, user_message must be in the reply language.
-8. If reply_language is hinglish, user_message should be casual Hinglish.
-9. If reply_language is telugu, user_message should be simple roman Telugu.
-10. reason must be less than 8 words.
-11. Return valid raw JSON only.
-12. No markdown. No explanation.
-13. target_text is REQUIRED whenever action is "tap". Always include it.
-14. Do not describe your reasoning in the output - only the final JSON.
+6. Do not independently authorize payments, transfers, credential entry,
+   OTP entry, PIN entry, account deletion, or other protected operations.
+7. If the action cannot be selected safely or reliably, use ask_user.
+8. user_message must be in English.
+9. reason must be fewer than 8 words.
+10. Return valid raw JSON only.
+11. No markdown.
+12. No explanation.
+13. target_text is REQUIRED whenever action is "tap".
+14. Do not describe your reasoning in the output.
+15. Never invent element IDs, resource IDs, coordinates, visible text,
+    contacts, applications, or UI controls.
+16. Do not claim that an action succeeded. You only select the next action.
+17. Do not return "done" unless the Android screen provides evidence
+    that the requested goal is visibly complete.
 
 JSON format:
+
 {{
   "action": "tap|type|swipe|wait|done|ask_user",
   "element_id": number|null,
@@ -111,4 +147,5 @@ JSON format:
   "confidence": number
 }}
 """
+
     return prompt.strip()

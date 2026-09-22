@@ -9,7 +9,7 @@ class TaskManager {
         private const val MAX_HISTORY = 8
     }
 
-    @Volatile private var state: TaskState? = null
+    private var state: TaskState? = null
     private val history = ArrayDeque<String>()
 
     @Synchronized
@@ -26,20 +26,20 @@ class TaskManager {
         app: String? = null,
         screenType: String = "unknown"
     ) {
-        state?.apply {
-            currentPackage = packageName
-            currentApp = app
-            lastScreenSignature = signature
-            this.screenType = screenType
-        }
+        state = state?.copy(
+            currentPackage = packageName,
+            currentApp = app,
+            lastScreenSignature = signature,
+            screenType = screenType
+        )
     }
 
     @Synchronized
     fun action(name: String, screenSignature: String? = null) {
-        state?.apply {
-            currentStep++
+        state = state?.copy(
+            currentStep = (state?.currentStep ?: 0) + 1,
             lastAction = name
-        }
+        )
         if (!screenSignature.isNullOrBlank()) {
             history.add("$screenSignature|$name")
             while (history.size > MAX_HISTORY) history.removeFirst()
@@ -48,20 +48,22 @@ class TaskManager {
 
     @Synchronized
     fun success() {
-        state?.apply {
-            completedSteps++
+        state = state?.copy(
+            completedSteps = (state?.completedSteps ?: 0) + 1,
             failedAttempts = 0
-        }
+        )
     }
 
     @Synchronized
     fun failure() {
-        state?.failedAttempts = (state?.failedAttempts ?: 0) + 1
+        state = state?.copy(
+            failedAttempts = (state?.failedAttempts ?: 0) + 1
+        )
     }
 
     @Synchronized
     fun markSideEffect() {
-        state?.sideEffectDispatched = true
+        state = state?.copy(sideEffectDispatched = true)
     }
 
     @Synchronized
@@ -72,14 +74,14 @@ class TaskManager {
     }
 
     @Synchronized
-    fun shouldStop(): Boolean =
-        state?.cancelled == true ||
-                (state?.failedAttempts ?: 0) >= MAX_FAILURES ||
-                loopDetected()
+    fun shouldStop(): Boolean {
+        val current = state ?: return true
+        return current.cancelled || current.failedAttempts >= MAX_FAILURES || loopDetected()
+    }
 
     @Synchronized
     fun cancel() {
-        state?.cancelled = true
+        state = state?.copy(cancelled = true)
     }
 
     @Synchronized
@@ -89,5 +91,5 @@ class TaskManager {
     }
 
     @Synchronized
-    fun snapshot(): TaskState? = state?.copy()
+    fun snapshot(): TaskState? = state
 }

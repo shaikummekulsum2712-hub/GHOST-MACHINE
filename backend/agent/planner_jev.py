@@ -32,7 +32,7 @@ OLLAMA_BASE_URL = os.getenv(
 
 OPTION_MODEL = os.getenv(
     "OPTION_MODEL",
-    "qwen3:8b",
+    "qwen2.5:0.5b",
 )
 
 OPTION_MODEL_TIMEOUT = int(
@@ -44,6 +44,7 @@ LAYA_MODEL = os.getenv(
     "convaiinnovations/laya",
 )
 
+MIN_LAYA_CONFIDENCE = 0.55
 _LAYA_AGENT = None
 
 
@@ -303,6 +304,19 @@ def _get_laya_agent():
     return _LAYA_AGENT
 
 
+def preload_laya():
+    """Load the Laya checkpoint during backend startup, not mid-command."""
+    try:
+        _get_laya_agent()
+        return True
+    except Exception as exc:
+        print(f"[LAYA] Preload failed: {exc}")
+        return False
+
+if os.getenv("PRELOAD_LAYA", "1") == "1":
+    preload_laya()
+
+
 def build_laya_state(
     command: str,
     current_state: str,
@@ -393,6 +407,15 @@ def route_with_laya(
         f"[LAYA] choice={selected_key} "
         f"confidence={confidence}"
     )
+
+    try:
+        confidence_value = float(confidence)
+    except (TypeError, ValueError):
+        confidence_value = 0.0
+
+    if confidence_value < MIN_LAYA_CONFIDENCE:
+        print(f"[LAYA] Rejecting low-confidence choice: {confidence_value}")
+        return None
 
     if not selected_key:
         print(

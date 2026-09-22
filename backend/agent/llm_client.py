@@ -15,8 +15,8 @@ from agent.prompt_builder import build_vision_prompt
 
 load_dotenv()
 
-VLM_OLLAMA_BASE_URL = os.getenv("VLM_OLLAMA_BASE_URL", os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"))
-VLM_OLLAMA_MODEL = os.getenv("VLM_OLLAMA_MODEL", "qwen3-vl:2b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3-vl:2b")
 
 
 def encode_image_to_base64(image_path: str) -> str:
@@ -122,21 +122,25 @@ def call_vision_model(
     )
 
     image_base64 = encode_image_to_base64(screenshot_path)
-    url = f"{VLM_OLLAMA_BASE_URL.strip('/')}/api/chat"
+    url = f"{OLLAMA_BASE_URL.strip('/')}/api/chat"
 
     def make_payload(extra_nudge: str = "") -> dict:
         final_prompt = prompt if not extra_nudge else prompt + "\n\n" + extra_nudge
         return {
-            "model": VLM_OLLAMA_MODEL,
+            "model": OLLAMA_MODEL,
             "messages": [
-                {"role": "user", "content": final_prompt, "images": [image_base64]}
+                {
+                    "role": "system",
+                    "content": "Return only the requested JSON action. Do not reason aloud. Do not explain. Do not use a thinking trace."
+                },
+                {"role": "user", "content": "/no_think\n" + final_prompt, "images": [image_base64]}
             ],
             "stream": False,
             "format": "json",
             "keep_alive": "30m",
             "options": {
                 "temperature": 0,
-                "num_predict": 300,
+                "num_predict": 1024,
                 "num_ctx": 3072,
                 "top_k": 1,
                 "top_p": 0.1
@@ -150,7 +154,7 @@ def call_vision_model(
         payload = make_payload(nudge)
 
         try:
-            response = requests.post(url, json=payload, timeout=180)
+            response = requests.post(url, json=payload, timeout=90)
             print(f"Ollama status code (attempt {attempt}):", response.status_code)
             print(f"Ollama raw response (attempt {attempt}):", response.text)
 

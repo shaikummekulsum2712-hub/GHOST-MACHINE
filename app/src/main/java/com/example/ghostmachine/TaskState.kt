@@ -1,17 +1,20 @@
 package com.example.ghostmachine
 
+/**
+ * Immutable representation of the current execution state of an agent task.
+ */
 data class TaskState(
     val goal: String = "",
-    var intent: String = "",
-    var target: String = "",
-    var currentStep: Int = 0,
-    var completedSteps: Int = 0,
-    var failedAttempts: Int = 0,
-    var lastAction: String? = null,
-    var lastScreenSignature: String? = null,
-    var currentPackage: String? = null,
-    var currentApp: String? = null,
-    var screenType: String = "unknown",
-    var sideEffectDispatched: Boolean = false,
-    var cancelled: Boolean = false
+    val intent: String = "",
+    val target: String = "",
+    val currentStep: Int = 0,
+    val completedSteps: Int = 0,
+    val failedAttempts: Int = 0,
+    val lastAction: String? = null,
+    val lastScreenSignature: String? = null,
+    val currentPackage: String? = null,
+    val currentApp: String? = null,
+    val screenType: String = "unknown",
+    val sideEffectDispatched: Boolean = false,
+    val cancelled: Boolean = false
 )
