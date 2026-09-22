@@ -11,7 +11,7 @@ import android.net.Uri
 object BackendConfig {
     private const val PREFS = "ghost_machine_settings"
     private const val BASE_URL_KEY = "backend_base_url"
-    const val DEFAULT_BASE_URL = "http://192.168.1.8:8000"
+    const val DEFAULT_BASE_URL = "http://172.28.16.1:8000"
 
     fun baseUrl(context: Context): String = context
         .getSharedPreferences(PREFS, Context.MODE_PRIVATE)

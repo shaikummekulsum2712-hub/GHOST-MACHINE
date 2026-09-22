@@ -9,45 +9,19 @@ from agent.action_schema import CommandRequest, ActionResponse
 from agent.safety_filter import apply_safety_filter
 
 
-from agent.planner import plan_command, PlanResponse
+from agent.planner_jev import plan_command, PlanResponse
 from pydantic import BaseModel
 
 class PlanRequest(BaseModel):
     command: str
     reply_language: str = "english"
+    current_state: str = ""
+    last_action: str | None = None
 
-CONFIDENCE_FLOOR = 0.45  # tune once you have real logs of model confidence
+CONFIDENCE_FLOOR = 0.55  # tune once you have real logs of model confidence
 
 app = FastAPI(title="Ghost Machine Backend")
 
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "service": "ghost-machine-backend"
-    }
-
-@app.get("/v1/models")
-def list_models():
-    import os
-
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": os.getenv("OLLAMA_PLANNER_MODEL", "qwen2.5:1.5b"),
-                "object": "model",
-                "created": 0,
-                "owned_by": "ollama"
-            },
-            {
-                "id": os.getenv("OLLAMA_MODEL", "qwen3-vl:2b"),
-                "object": "model",
-                "created": 0,
-                "owned_by": "ollama"
-            }
-        ]
-    }
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -139,7 +113,12 @@ def get_uploaded_file(filename: str):
 
 @app.post("/plan-command", response_model=PlanResponse)
 async def plan_command_endpoint(req: PlanRequest):
-    return plan_command(req.command, req.reply_language)
+    return plan_command(
+        req.command,
+        req.reply_language,
+        current_state=req.current_state,
+        last_action=req.last_action,
+    )
 
 
 @app.post("/next-action", response_model=ActionResponse)
@@ -208,16 +187,6 @@ async def analyze_screen(
 
     # --- Safety filter: deterministic keyword block, runs first, always ---
     action = apply_safety_filter(action, command=command)
-
-    # --- Confidence floor: downgrade uncertain non-blocked actions to ask_user ---
-    if action.action != "ask_user" and action.confidence < CONFIDENCE_FLOOR:
-        action = action.model_copy(update={
-            "action": "ask_user",
-            "user_message": action.user_message or "I'm not fully sure — can you clarify?",
-            "reason": f"{action.reason} (confidence {action.confidence:.2f} below floor)",
-        })
-
-    print(f"Final backend action: {action.action} (conf={action.confidence:.2f})")
 
     update_status(
         status="success",
