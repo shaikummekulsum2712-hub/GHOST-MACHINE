@@ -7,257 +7,289 @@ object VoiceLanguageManager {
         val normalizedCommand: String,
         val parsedIntent: String,
         val parsedTarget: String,
-        val replyLanguage: String
+        val replyLanguage: String,
+        val parsedPerson: String = "",
+        val parsedMessage: String = "",
+        val parsedApp: String = "",
+        val durationSeconds: Long = 0L
     )
 
-    // Whole-word dictionaries. Using Sets instead of Lists gives O(1) lookup
-    // and, combined with tokenize(), guarantees we only match real standalone
-    // words - not substrings buried inside unrelated words.
+    private data class Parsed(
+        val intent: String,
+        val target: String = "",
+        val person: String = "",
+        val message: String = "",
+        val app: String = "",
+        val durationSeconds: Long = 0L
+    )
+
     private val teluguWords = setOf(
-        "cheyyi", "chesey", "chesi", "pettu",
-        "kanipistundi", "pampu", "vaddu", "aapu", "sare", "rayi"
+        "cheyyi", "chesey", "chesi", "pettu", "kanipistundi", "pampu",
+        "vaddu", "aapu", "sare", "rayi"
     )
 
     private val hindiHinglishWords = setOf(
-        "karo", "kar", "kholo", "bhejo", "mat", "ruk", "ruko",
-        "haan", "nahi", "dhundo", "khojo", "likho"
+        "karo", "kar", "kholo", "bhejo", "mat", "ruk", "ruko", "haan",
+        "nahi", "dhundo", "khojo", "likho"
     )
 
-    /**
-     * Splits a command into lowercase word tokens, stripping punctuation.
-     * This is the basis for all word-boundary matching below, so we never
-     * accidentally match a dictionary word that's just a substring of some
-     * unrelated bigger word (e.g. "kar" inside "market").
-     */
-    private fun tokenize(command: String): List<String> {
-        return Regex("[a-zA-Z]+")
-            .findAll(command.lowercase())
-            .map { it.value }
-            .toList()
-    }
+    private fun tokenize(command: String): List<String> =
+        Regex("[a-zA-Z0-9]+").findAll(command.lowercase()).map { it.value }.toList()
 
     fun buildContext(command: String): VoiceCommandContext {
         val original = command.trim()
         val language = detectReplyLanguage(original)
         val normalized = normalizeCommand(original)
-        val parsed = parseNormalizedCommand(normalized)
+        val parsed = parse(normalized)
 
         return VoiceCommandContext(
             originalCommand = original,
             normalizedCommand = normalized,
-            parsedIntent = parsed.first,
-            parsedTarget = parsed.second,
-            replyLanguage = language
+            parsedIntent = parsed.intent,
+            parsedTarget = parsed.target,
+            replyLanguage = language,
+            parsedPerson = parsed.person,
+            parsedMessage = parsed.message,
+            parsedApp = parsed.app,
+            durationSeconds = parsed.durationSeconds
         )
     }
 
-    /**
-     * Scores the command against each language's dictionary by counting how
-     * many *distinct whole words* matched (not substrings), then returns the
-     * language with the highest score. Ties, and cases with zero matches,
-     * fall back to English so we never confidently guess wrong on thin
-     * evidence.
-     */
     fun detectReplyLanguage(command: String): String {
         val tokens = tokenize(command)
         if (tokens.isEmpty()) return "english"
-
-        val tokenSet = tokens.toSet()
-
-        val teluguScore = tokenSet.count { it in teluguWords }
-        val hinglishScore = tokenSet.count { it in hindiHinglishWords }
-
+        val set = tokens.toSet()
+        val teluguScore = set.count { it in teluguWords }
+        val hinglishScore = set.count { it in hindiHinglishWords }
         return when {
             teluguScore == 0 && hinglishScore == 0 -> "english"
             teluguScore > hinglishScore -> "telugu"
-            hinglishScore > teluguScore -> "hinglish"
-            // Tie with at least one match on both sides - ambiguous code-mix.
-            // Default to hinglish since it's the larger dictionary/user base,
-            // but this is a judgment call you can flip if needed.
             else -> "hinglish"
         }
     }
 
-    /**
-     * Replaces known multi-word phrases and single roman words with their
-     * English equivalents. Multi-word phrases are naturally safe with plain
-     * substring replace since spaces act as boundaries. Single-word
-     * replacements use word-boundary regex so we don't corrupt unrelated
-     * English words that happen to contain the same letters.
-     */
     fun normalizeCommand(command: String): String {
         var text = command.lowercase().trim()
 
-        // Multi-word phrases (space-delimited, so substring replace is safe here)
         val phraseReplacements = listOf(
-            "search karo" to "search for",
-            "search kar" to "search for",
-            "dhundo" to "search for",
-            "khojo" to "search for",
-            "open karo" to "open",
-            "kholo" to "open",
-            "bhejo" to "send",
-            "likho" to "type",
-            "ruk jao" to "stop",
-            "ruko" to "stop",
-            "search cheyyi" to "search for",
-            "search chesey" to "search for",
-            "open cheyyi" to "open",
-            "open chesey" to "open",
-            "type cheyyi" to "type"
+            "search karo" to "search for", "search kar" to "search for",
+            "dhundo" to "search for", "khojo" to "search for",
+            "open karo" to "open", "kholo" to "open",
+            "bhejo" to "send", "likho" to "type",
+            "search cheyyi" to "search for", "search chesey" to "search for",
+            "open cheyyi" to "open", "open chesey" to "open",
+            "type cheyyi" to "type", "ruk jao" to "stop", "ruko" to "stop"
         )
+        for ((from, to) in phraseReplacements) text = text.replace(from, to)
 
-        for ((from, to) in phraseReplacements) {
-            text = text.replace(from, to)
-        }
-
-        // Single-word replacements - word-boundary matched so e.g. "rayi"
-        // never matches as part of a longer unrelated word.
-        val wordReplacements = listOf(
-            "rayi" to "type",
-            "pampu" to "send",
-            "aapu" to "stop"
-        )
-
+        val wordReplacements = listOf("rayi" to "type", "pampu" to "send", "aapu" to "stop")
         for ((from, to) in wordReplacements) {
             text = text.replace(Regex("\\b${Regex.escape(from)}\\b"), to)
         }
 
-        // Common natural patterns: trailing "search"-style suffixes get
-        // moved to the front as "search for X"
-        if (text.endsWith(" search for")) {
-            text = "search for " + text.removeSuffix(" search for").trim()
-        } else if (text.endsWith(" search")) {
-            text = "search for " + text.removeSuffix(" search").trim()
-        } else if (text.endsWith(" search karo")) {
-            text = "search for " + text.removeSuffix(" search karo").trim()
-        } else if (text.endsWith(" search cheyyi")) {
-            text = "search for " + text.removeSuffix(" search cheyyi").trim()
-        }
-
-        return text.trim()
+        return text.replace(Regex("\\s+"), " ").trim()
     }
 
-    private data class IntentSpec(
-        val intent: String,
-        val triggerWords: Set<String>,
-        val fillerWords: Set<String>
-    )
-
-    // To support a new way of phrasing a command, add words to these sets.
-// Do NOT add new regex patterns/prefixes elsewhere - this is the one place.
-    private val intentSpecs = listOf(
-        IntentSpec(
-            intent = "search",
-            triggerWords = setOf("search", "find", "look"),
-            fillerWords = setOf("search", "for", "find", "look", "up", "please", "the")
-        ),
-        IntentSpec(
-            intent = "type",
-            triggerWords = setOf("type", "write", "enter"),
-            fillerWords = setOf("type", "write", "enter", "please", "the")
-        ),
-        IntentSpec(
-            intent = "open_chat",
-            triggerWords = setOf("chat", "message", "text"),
-            fillerWords = setOf("open", "my", "the", "please", "with", "to", "up", "a", "chat", "message", "text")
-        ),
-        IntentSpec(
-            intent = "tap",
-            triggerWords = setOf("tap", "click", "press", "select"),
-            fillerWords = setOf("tap", "click", "press", "select", "on", "the", "please")
-        )
-    )
-
+    // Kept for any legacy caller that still wants the simple (intent, target) shape.
     fun parseNormalizedCommand(command: String): Pair<String, String> {
+        val p = parse(command)
+        return p.intent to p.target
+    }
+
+    private val appNamePattern =
+        "(whatsapp business|whatsapp|instagram|telegram|facebook messenger|messenger|facebook|messages|sms|phone|dialer|chrome|google|youtube)"
+
+    private fun parse(command: String): Parsed {
         val lower = command.lowercase().trim()
-        val tokens = lower.split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (lower.isBlank()) return Parsed("unknown", "")
 
         when {
-            lower.contains("scroll down") || lower.contains("swipe down") -> return "scroll" to "down"
-            lower.contains("scroll up") || lower.contains("swipe up") -> return "scroll" to "up"
-            lower.contains("scroll left") || lower.contains("swipe left") -> return "scroll" to "left"
-            lower.contains("scroll right") || lower.contains("swipe right") -> return "scroll" to "right"
-            lower.contains("go back") || lower == "back" -> return "back" to ""
-            lower == "home" || lower.contains("go home") || lower.contains("home screen") -> return "home" to ""
-            lower == "stop" || lower == "cancel" -> return "stop" to ""
+            lower == "stop" || lower == "cancel" -> return Parsed("stop")
+            lower == "home" || lower == "go home" || lower == "home screen" -> return Parsed("home")
+            lower == "back" || lower == "go back" -> return Parsed("back")
+            lower.contains("scroll down") || lower.contains("swipe down") -> return Parsed("scroll", "down")
+            lower.contains("scroll up") || lower.contains("swipe up") -> return Parsed("scroll", "up")
+            lower.contains("scroll left") || lower.contains("swipe left") -> return Parsed("scroll", "left")
+            lower.contains("scroll right") || lower.contains("swipe right") -> return Parsed("scroll", "right")
         }
 
-        val callRegex = Regex("^call (.+)$")
-        callRegex.find(lower)?.let { match ->
-            val contact = match.groupValues[1].trim()
-            if (contact.isNotBlank()) return "call" to contact
+        parseTimer(lower)?.let { return it }
+        parseVideoCall(lower)?.let { return it }
+        parseCall(lower)?.let { return it }
+        parseSendOnly(lower)?.let { return it }
+        parseTypeAndSend(lower)?.let { return it }
+        parseOpenChat(lower)?.let { return it }
+        parseType(lower)?.let { return it }
+        parseSearch(lower)?.let { return it }
+        parseOpen(lower)?.let { return it }
+        parseTap(lower)?.let { return it }
+
+        return Parsed("unknown", command)
+    }
+
+    private fun parseTimer(lower: String): Parsed? {
+        if (!lower.contains("timer")) return null
+        val match = Regex(
+            "(?:set|start|create|make|put)?\\s*(?:me\\s*)?(?:a\\s*)?timer\\s*(?:for\\s*)?(\\d+(?:\\.\\d+)?)\\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)"
+        ).find(lower) ?: return null
+        val value = match.groupValues[1].toDoubleOrNull() ?: return null
+        val unit = match.groupValues[2]
+        val seconds = when {
+            unit.startsWith("hour") || unit.startsWith("hr") -> (value * 3600.0).toLong()
+            unit.startsWith("minute") || unit.startsWith("min") -> (value * 60.0).toLong()
+            else -> value.toLong()
+        }
+        if (seconds <= 0L) return null
+        return Parsed("timer", seconds.toString(), durationSeconds = seconds)
+    }
+
+    // "send it" / "send" (no message text) - send whatever is ALREADY typed.
+    private fun parseSendOnly(lower: String): Parsed? {
+        if (lower == "send" || lower == "send it" || lower == "send this" || lower == "send that") {
+            return Parsed("send")
+        }
+        return null
+    }
+
+    // "type hello and send it" / "type hello and send" / "send hello" with real
+    // content / "msg/message/reply hello" -> type (if needed) then send.
+    private fun parseTypeAndSend(lower: String): Parsed? {
+        val typeAndSend = Regex("^type\\s+(.+?)\\s+(?:and\\s+)?send(?:\\s+it)?$").find(lower)
+        if (typeAndSend != null) {
+            val message = typeAndSend.groupValues[1].trim()
+            return Parsed("type_and_send", message, message = message)
         }
 
-        for (spec in intentSpecs) {
-            if (tokens.any { it in spec.triggerWords }) {
-                val target = tokens.filterNot { it in spec.fillerWords }
-                    .joinToString(" ")
-                    .trim()
+        val contextMessage = Regex(
+            "^(?:send|msg|message|text|reply|tell (?:him|her|them))\\s+(?:him\\s+|her\\s+|them\\s+|it\\s+)?(.+)$"
+        ).find(lower)
+        if (contextMessage != null) {
+            val message = contextMessage.groupValues[1].trim()
+            if (message.isNotBlank()) return Parsed("type_and_send", message, message = message)
+        }
+        return null
+    }
 
-                if (target.isNotBlank()) {
-                    return spec.intent to target
-                }
+    private fun parseVideoCall(lower: String): Parsed? {
+        val match = Regex(
+            "^(?:video call|video chat)(?:\\s+to)?\\s+(.+?)(?:\\s+(?:on|via|using|in|from)\\s+$appNamePattern)?$"
+        ).find(lower) ?: return null
+        val person = match.groupValues[1].trim()
+        val app = match.groupValues.getOrNull(2)?.trim().orEmpty()
+        if (person.isBlank()) return null
+        return Parsed("video_call", person, person = person, app = app)
+    }
+
+    private fun parseCall(lower: String): Parsed? {
+        val match = Regex(
+            "^(?:call|phone|ring)(?:\\s+to)?\\s+(.+?)(?:\\s+(?:on|via|using|in|from)\\s+$appNamePattern)?$"
+        ).find(lower) ?: return null
+        val person = match.groupValues[1].trim()
+        val app = match.groupValues.getOrNull(2)?.trim().orEmpty()
+        if (person.isBlank()) return null
+        return Parsed("call", person, person = person, app = app)
+    }
+
+    // "open chat with X [in/from/on App]" / "message X [in/from/on App]" /
+    // "open chat [in App]" (no person)
+    private fun parseOpenChat(lower: String): Parsed? {
+        val withPerson = Regex(
+            "^(?:open\\s+)?(?:chat|message|messages|messaging|conversation)\\s+(?:with\\s+|to\\s+)?(.+?)(?:\\s+(?:on|via|using|in|from)\\s+$appNamePattern)?$"
+        ).find(lower)
+        if (withPerson != null) {
+            val person = withPerson.groupValues[1].trim()
+            val app = withPerson.groupValues.getOrNull(2)?.trim().orEmpty()
+            if (person.isNotBlank() && person !in setOf("with", "to")) {
+                return Parsed("open_chat", person, person = person, app = app)
             }
         }
 
-        return "unknown" to command
+        val noPerson = Regex(
+            "^(?:open|start|go to)\\s+(?:chat|message|messages|messaging|conversation)(?:\\s+(?:on|via|using|in|from)\\s+$appNamePattern)?$"
+        ).find(lower)
+        if (noPerson != null) {
+            val app = noPerson.groupValues.getOrNull(1)?.trim().orEmpty()
+            return Parsed("open_chat", "", person = "", app = app)
+        }
+
+        if (lower == "open chat" || lower == "chat" || lower == "messages" || lower == "open messages") {
+            return Parsed("open_chat")
+        }
+        return null
     }
 
-    fun message(key: String, language: String, extra: String = ""): String {
-        return when (language) {
-            "hinglish" -> hinglishMessage(key, extra)
-            "telugu" -> teluguMessage(key, extra)
-            else -> englishMessage(key, extra)
-        }
+    private fun parseType(lower: String): Parsed? {
+        val match = Regex("^(?:type|write|enter)\\s+(.+)$").find(lower) ?: return null
+        return Parsed("type", match.groupValues[1].trim())
     }
 
-    private fun englishMessage(key: String, extra: String): String {
-        return when (key) {
-
-            "listening" -> "Listening..."
-            "processing_voice" -> "Processing voice..."
-            "understood" -> "Understood: $extra"
-            "checking" -> "Checking screen..."
-            "thinking" -> "Thinking..."
-            "doing" -> "Doing it..."
-            "done" -> "Done."
-            "error" -> "Something went wrong. Please try again."
-            "need_help" -> extra.ifBlank { "I need help. What should I do?" }
-            "local_model_failed" -> "Local model failed. Please try again."
-            else -> extra.ifBlank { "Okay." }
-        }
+    private fun parseSearch(lower: String): Parsed? {
+        val match = Regex(
+            "^(?:search|find|look(?:\\s+for)?)(?:\\s+for)?\\s+(.+?)(?:\\s+(?:in|on)\\s+$appNamePattern)?$"
+        ).find(lower) ?: return null
+        val query = match.groupValues[1].trim()
+        val app = match.groupValues.getOrNull(2)?.trim().orEmpty()
+        if (query.isBlank()) return null
+        return Parsed("search", query, app = app)
     }
 
-    private fun hinglishMessage(key: String, extra: String): String {
-        return when (key) {
-            "listening" -> "Sun raha hoon..."
-            "processing_voice" -> "Voice process kar raha hoon..."
-            "understood" -> "Samajh gaya: $extra"
-            "checking" -> "Screen check kar raha hoon..."
-            "thinking" -> "Soch raha hoon..."
-            "doing" -> "Kar raha hoon..."
-            "done" -> "Ho gaya."
-            "error" -> "Kuch galat ho gaya. Phir try karo."
-            "need_help" -> extra.ifBlank { "Mujhe help chahiye. Kya karu?" }
-            "local_model_failed" -> "Local model fail ho gaya. Phir try karo."
-            else -> extra.ifBlank { "Theek hai." }
-        }
+    private fun parseOpen(lower: String): Parsed? {
+        val match = Regex("^(?:open|launch|start)\\s+(.+)$").find(lower) ?: return null
+        val target = match.groupValues[1].trim()
+        if (target.isBlank()) return null
+        return Parsed("open", target)
     }
 
-    private fun teluguMessage(key: String, extra: String): String {
-        return when (key) {
-            "listening" -> "Vintunnanu..."
-            "processing_voice" -> "Voice process chesthunnanu..."
-            "understood" -> "Ardham ayyindi: $extra"
-            "checking" -> "Screen check chesthunnanu..."
-            "thinking" -> "Alochistunnanu..."
-            "doing" -> "Chesthunnanu..."
-            "done" -> "Ayyindi."
-            "error" -> "Edo tappu ayyindi. Malli try cheyyi."
-            "need_help" -> extra.ifBlank { "Naaku help kavali. Emi cheyyali?" }
-            "local_model_failed" -> "Local model fail ayyindi. Malli try cheyyi."
-            else -> extra.ifBlank { "Sare." }
-        }
+    private fun parseTap(lower: String): Parsed? {
+        val match = Regex("^(?:tap|click|press|select)\\s+(?:on\\s+)?(.+)$").find(lower) ?: return null
+        return Parsed("tap", match.groupValues[1].trim())
+    }
+
+    fun message(key: String, language: String, extra: String = ""): String = when (language) {
+        "hinglish" -> hinglishMessage(key, extra)
+        "telugu" -> teluguMessage(key, extra)
+        else -> englishMessage(key, extra)
+    }
+
+    private fun englishMessage(key: String, extra: String): String = when (key) {
+        "heard" -> "You said: $extra"
+        "listening" -> "Listening..."
+        "processing_voice" -> "Processing voice..."
+        "understood" -> "Understood: $extra"
+        "checking" -> "Checking screen..."
+        "thinking" -> "Thinking..."
+        "doing" -> "Doing it..."
+        "done" -> "Done."
+        "error" -> "Something went wrong. Please try again."
+        "need_help" -> extra.ifBlank { "I need help. What should I do?" }
+        else -> extra.ifBlank { "Okay." }
+    }
+
+    private fun hinglishMessage(key: String, extra: String): String = when (key) {
+        "heard" -> "Aapne kaha: $extra"
+        "listening" -> "Sun raha hoon..."
+        "processing_voice" -> "Voice process kar raha hoon..."
+        "understood" -> "Samajh gaya: $extra"
+        "checking" -> "Screen check kar raha hoon..."
+        "thinking" -> "Soch raha hoon..."
+        "doing" -> "Kar raha hoon..."
+        "done" -> "Ho gaya."
+        "error" -> "Kuch galat ho gaya. Phir try karo."
+        "need_help" -> extra.ifBlank { "Mujhe help chahiye. Kya karu?" }
+        else -> extra.ifBlank { "Theek hai." }
+    }
+
+    private fun teluguMessage(key: String, extra: String): String = when (key) {
+        "heard" -> "Meeru cheppindi: $extra"
+        "listening" -> "Vintunnanu..."
+        "processing_voice" -> "Voice process chesthunnanu..."
+        "understood" -> "Ardham ayyindi: $extra"
+        "checking" -> "Screen check chesthunnanu..."
+        "thinking" -> "Alochistunnanu..."
+        "doing" -> "Chesthunnanu..."
+        "done" -> "Ayyindi."
+        "error" -> "Edo tappu ayyindi. Malli try cheyyi."
+        "need_help" -> extra.ifBlank { "Naaku help kavali. Emi cheyyali?" }
+        else -> extra.ifBlank { "Sare." }
     }
 }

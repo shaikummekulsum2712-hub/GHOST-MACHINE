@@ -16,10 +16,38 @@ class PlanRequest(BaseModel):
     command: str
     reply_language: str = "english"
 
-CONFIDENCE_FLOOR = 0.55  # tune once you have real logs of model confidence
+CONFIDENCE_FLOOR = 0.45  # tune once you have real logs of model confidence
 
 app = FastAPI(title="Ghost Machine Backend")
 
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "service": "ghost-machine-backend"
+    }
+
+@app.get("/v1/models")
+def list_models():
+    import os
+
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": os.getenv("OLLAMA_PLANNER_MODEL", "qwen2.5:1.5b"),
+                "object": "model",
+                "created": 0,
+                "owned_by": "ollama"
+            },
+            {
+                "id": os.getenv("OLLAMA_MODEL", "qwen3-vl:2b"),
+                "object": "model",
+                "created": 0,
+                "owned_by": "ollama"
+            }
+        ]
+    }
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
@@ -188,6 +216,8 @@ async def analyze_screen(
             "user_message": action.user_message or "I'm not fully sure — can you clarify?",
             "reason": f"{action.reason} (confidence {action.confidence:.2f} below floor)",
         })
+
+    print(f"Final backend action: {action.action} (conf={action.confidence:.2f})")
 
     update_status(
         status="success",

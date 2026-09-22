@@ -61,7 +61,7 @@ def _clean_json(text: str) -> dict:
 # OPTION A: Ollama (local) - UNCOMMENT THIS BLOCK TO USE
 # =====================================================================
 import requests
-#
+
 # OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 # OLLAMA_PLANNER_MODEL = os.getenv("OLLAMA_PLANNER_MODEL", "qwen2.5:1.5b")
 #
@@ -87,7 +87,7 @@ import requests
 from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
 
 llm = HuggingFaceEndpoint(
-    repo_id="MiniMaxAI/MiniMax-M2.5",
+    repo_id="Qwen/Qwen2.5-72B-Instruct",
     task="text-generation",
     max_new_tokens=400,
 )
@@ -104,17 +104,49 @@ def plan_command(command: str, reply_language: str) -> PlanResponse:
     for attempt in range(2):
         try:
             prompt = base_prompt if attempt == 0 else (
-                base_prompt + "\n\nOutput ONLY the JSON object. No explanation, no extra text."
+                base_prompt +
+                "\n\nReturn only the JSON object. "
+                "Do not include explanation or markdown."
             )
+
             text = _call_model(prompt)
             print(f"RAW PLANNER OUTPUT (attempt {attempt}):", repr(text))
 
             data = _clean_json(text)
-            steps = [
-                PlannedStep(intent=s["intent"], target=s["target"])
-                for s in data.get("steps", [])
-                if s.get("intent") in ALLOWED_INTENTS and s.get("target")
-            ]
+            raw_steps = data.get("steps", [])
+
+            if not isinstance(raw_steps, list):
+                raise ValueError("Planner steps must be a list")
+
+            steps: list[PlannedStep] = []
+
+            for raw_step in raw_steps[:8]:
+                if not isinstance(raw_step, dict):
+                    continue
+
+                intent = str(raw_step.get("intent", "")).strip().lower()
+                target = str(raw_step.get("target", "")).strip()
+
+                if intent not in ALLOWED_INTENTS:
+                    continue
+
+                if not target or len(target) > 500:
+                    continue
+
+                if intent in {"search", "type", "type_and_send", "call", "open_chat"}:
+                    if not target:
+                        continue
+
+                if intent == "scroll":
+                    if target.lower() not in {"up", "down", "left", "right"}:
+                        continue
+
+                steps.append(
+                    PlannedStep(
+                        intent=intent,
+                        target=target,
+                    )
+                )
 
             if steps:
                 return PlanResponse(steps=steps)
@@ -122,4 +154,5 @@ def plan_command(command: str, reply_language: str) -> PlanResponse:
         except Exception as e:
             print(f"Planner failed (attempt {attempt}):", e)
 
-    return PlanResponse(steps=[PlannedStep(intent="tap", target=command)])
+
+    return PlanResponse(steps=[])

@@ -13,6 +13,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.AlarmClock
+import android.provider.CalendarContract
 import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -41,7 +43,7 @@ class GhostAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "GhostService"
-        private const val MAX_STEPS = 6
+        private const val MAX_STEPS = 10
         private const val CONFIDENCE_FLOOR = 0.55
         private const val STEP_DELAY_MS = 700L
         private const val APP_LAUNCH_DELAY_MS = 1200L
@@ -58,6 +60,11 @@ class GhostAccessibilityService : AccessibilityService() {
     private var currentReplyLanguage: String = "english"
 
     private var speechRecognizer: SpeechRecognizer? = null
+
+    // Side-effect guard: once a send/call action has actually been dispatched,
+    // never blindly repeat it just because verification needs another scan.
+    private var sideEffectKey: String? = null
+    private var sideEffectDispatched = false
 
     sealed class StepResult {
         object Done : StepResult()
@@ -110,22 +117,6 @@ class GhostAccessibilityService : AccessibilityService() {
         val confidence: Double = 1.0,
         val source: String = "android"
     )
-
-    // Every package here MUST also be declared under <queries> in
-    // AndroidManifest.xml, or getLaunchIntentForPackage() silently returns
-    // null on Android 11+ due to package visibility restrictions.
-    private val knownApps = mapOf(
-        "whatsapp business" to "com.whatsapp.w4b",
-        "whatsapp" to "com.whatsapp",
-        "youtube" to "com.google.android.youtube",
-        "chrome" to "com.android.chrome",
-        "google" to "com.google.android.googlequicksearchbox",
-        "phone" to "com.google.android.dialer"
-    )
-
-    private fun resolveCallAppPackage(): String {
-        return knownApps["phone"] ?: "com.android.dialer"
-    }
 
     private val sensitiveKeywords = setOf(
         "password", "otp", "one-time", "cvv", "pin", "card number",
@@ -285,17 +276,24 @@ class GhostAccessibilityService : AccessibilityService() {
 
             override fun onError(error: Int) {
                 val errorName = when (error) {
-                    SpeechRecognizer.ERROR_NO_MATCH -> "NO_MATCH"
-                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "SPEECH_TIMEOUT"
-                    else -> "ERROR($error)"
+                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "NETWORK_TIMEOUT"
+                    SpeechRecognizer.ERROR_NETWORK -> "NETWORK"
+                    SpeechRecognizer.ERROR_AUDIO -> "AUDIO"
+                    SpeechRecognizer.ERROR_SERVER -> "SERVER"
+                    SpeechRecognizer.ERROR_CLIENT -> "CLIENT"
+                    SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "SPEECH_TIMEOUT (didn't hear anything)"
+                    SpeechRecognizer.ERROR_NO_MATCH -> "NO_MATCH (heard audio, couldn't transcribe)"
+                    SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "RECOGNIZER_BUSY"
+                    SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "INSUFFICIENT_PERMISSIONS"
+                    else -> "UNKNOWN($error)"
                 }
                 Log.e(TAG, "Speech error: $errorName")
-
-                if (error == SpeechRecognizer.ERROR_NO_MATCH) {
-                    setOverlayStatus("Didn't catch that, listening again...")
-                    startVoiceInput()
+                if (error == SpeechRecognizer.ERROR_NO_MATCH ||
+                    error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                ) {
+                    setOverlayStatus(VoiceLanguageManager.message("need_help", currentReplyLanguage))
                 } else {
-                    setOverlayStatus("Voice error: $errorName")
+                    setOverlayStatus("Voice input had a problem. Please try again.")
                 }
             }
 
@@ -304,7 +302,9 @@ class GhostAccessibilityService : AccessibilityService() {
                 val command = matches?.firstOrNull()?.trim()
 
                 if (command.isNullOrBlank()) {
-                    setOverlayStatus("No command heard")
+                    val msg = VoiceLanguageManager.message("need_help", currentReplyLanguage)
+                    setOverlayStatus(msg)
+                    ghostTts?.speak(msg, currentReplyLanguage)
                     return
                 }
 
@@ -333,25 +333,43 @@ class GhostAccessibilityService : AccessibilityService() {
             return
         }
 
-
         if (isRunning.get()) {
             setOverlayStatus("Busy...")
             return
         }
 
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE,
+                Locale.getDefault().toLanguageTag()
+            )
+            putExtra(
+                RecognizerIntent.EXTRA_PARTIAL_RESULTS,
+                true
+            )
         }
 
+        Log.d(
+            TAG,
+            "START VOICE INPUT: language=${Locale.getDefault().toLanguageTag()}"
+        )
+
         try {
+            if (speechRecognizer == null) {
+                Log.e(TAG, "Speech recognizer was null; initializing it now")
+                initSpeechRecognizer()
+            }
+
+            speechRecognizer?.cancel()
             speechRecognizer?.startListening(intent)
+
         } catch (e: Exception) {
             Log.e(TAG, "startListening failed", e)
-            setOverlayStatus("Could not start voice")
+            setOverlayStatus("Could not start voice input")
         }
     }
 
@@ -364,6 +382,9 @@ class GhostAccessibilityService : AccessibilityService() {
             setOverlayStatus("Busy, please wait...")
             return
         }
+
+        sideEffectKey = null
+        sideEffectDispatched = false
 
         val voiceContext = VoiceLanguageManager.buildContext(command)
         currentReplyLanguage = voiceContext.replyLanguage
@@ -378,7 +399,17 @@ class GhostAccessibilityService : AccessibilityService() {
         setOverlayStatus(understoodMessage)
         ghostTts?.speak(understoodMessage, currentReplyLanguage)
 
-        val parsed = ParsedCommand(voiceContext.parsedIntent, voiceContext.parsedTarget)
+        val parsed = repairParsedCommand(voiceContext)
+        Log.d(TAG, "Parsed command: intent=${parsed.intent}, target=${parsed.target}")
+
+        val nativeHandled = handleNativeCapability(voiceContext.normalizedCommand, parsed)
+        if (nativeHandled) {
+            mainHandler.postDelayed({
+                showButtonAgain()
+                isRunning.set(false)
+            }, 900)
+            return
+        }
 
         if (handleDirectOpenCommand(voiceContext.normalizedCommand, parsed)) {
             mainHandler.postDelayed({
@@ -392,9 +423,19 @@ class GhostAccessibilityService : AccessibilityService() {
             try {
                 if (looksCompound(voiceContext.normalizedCommand)) {
                     Log.d(TAG, "normalizedCommand for compound check: ${voiceContext.normalizedCommand}")
-                    when (val plan = ApiClient.planCommand(voiceContext.normalizedCommand, currentReplyLanguage)) {
-                        is ApiClient.PlanResult.Success -> runMultiStepCommand(plan.steps, currentReplyLanguage)
-                        is ApiClient.PlanResult.Failure -> runVisionLoop(voiceContext.normalizedCommand, parsed, currentReplyLanguage)
+                    when (val plan = ApiClient.planCommand(
+                        this@GhostAccessibilityService,
+                        voiceContext.normalizedCommand,
+                        currentReplyLanguage
+                    )) {
+                        is ApiClient.PlanResult.Success ->
+                            runMultiStepCommand(plan.steps, currentReplyLanguage)
+
+                        is ApiClient.PlanResult.Failure ->
+                            runVisionLoop(voiceContext.normalizedCommand, parsed, currentReplyLanguage)
+
+                        else ->
+                            runVisionLoop(voiceContext.normalizedCommand, parsed, currentReplyLanguage)
                     }
                 } else {
                     runVisionLoop(voiceContext.normalizedCommand, parsed, currentReplyLanguage)
@@ -408,13 +449,57 @@ class GhostAccessibilityService : AccessibilityService() {
         }.start()
     }
 
+    private fun repairParsedCommand(context: VoiceLanguageManager.VoiceCommandContext): ParsedCommand {
+        val normalized = context.normalizedCommand.trim()
+        if (context.parsedIntent != "unknown" && context.parsedTarget.isNotBlank()) {
+            return ParsedCommand(context.parsedIntent, context.parsedTarget)
+        }
+
+        return when {
+            Regex("^open\\s+(.+)$", RegexOption.IGNORE_CASE).find(normalized) != null -> {
+                val target = Regex("^open\\s+(.+)$", RegexOption.IGNORE_CASE)
+                    .find(normalized)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                ParsedCommand("open", target)
+            }
+            Regex("^(?:search|find|look(?:\\s+up)?)\\s+(?:for\\s+)?(.+)$", RegexOption.IGNORE_CASE).find(normalized) != null -> {
+                val target = Regex("^(?:search|find|look(?:\\s+up)?)\\s+(?:for\\s+)?(.+)$", RegexOption.IGNORE_CASE)
+                    .find(normalized)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                ParsedCommand("search", target)
+            }
+            Regex("^call\\s+(.+)$", RegexOption.IGNORE_CASE).find(normalized) != null -> {
+                val target = Regex("^call\\s+(.+)$", RegexOption.IGNORE_CASE)
+                    .find(normalized)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                ParsedCommand("call", target)
+            }
+            Regex("^(?:message|text|chat)\\s+(.+)$", RegexOption.IGNORE_CASE).find(normalized) != null -> {
+                val target = Regex("^(?:message|text|chat)\\s+(.+)$", RegexOption.IGNORE_CASE)
+                    .find(normalized)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                ParsedCommand("open_chat", target)
+            }
+            Regex("^type\\s+(.+)$", RegexOption.IGNORE_CASE).find(normalized) != null -> {
+                val target = Regex("^type\\s+(.+)$", RegexOption.IGNORE_CASE)
+                    .find(normalized)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                ParsedCommand("type", target)
+            }
+            normalized == "back" || normalized == "go back" -> ParsedCommand("back", "")
+            normalized == "home" || normalized.contains("go home") -> ParsedCommand("home", "")
+            Regex("^(?:scroll|swipe)\\s+(up|down|left|right)$", RegexOption.IGNORE_CASE).find(normalized) != null -> {
+                val direction = Regex("^(?:scroll|swipe)\\s+(up|down|left|right)$", RegexOption.IGNORE_CASE)
+                    .find(normalized)?.groupValues?.getOrNull(1).orEmpty()
+                ParsedCommand("scroll", direction)
+            }
+            else -> ParsedCommand(context.parsedIntent, context.parsedTarget)
+        }
+    }
+
     private fun looksCompound(command: String): Boolean {
         val lower = command.lowercase()
 
         // Explicit multi-part phrasing
         val hasConjunction = lower.contains(" and ") ||
                 lower.contains(" then ") ||
-                lower.contains(", then")
+                lower.contains(", then") ||
+                lower.contains(",")
 
         // Judgment/browsing phrasing that implies multiple real-world steps
         // even without an explicit "and"/"then" - e.g. "find me the best
@@ -433,36 +518,125 @@ class GhostAccessibilityService : AccessibilityService() {
     // Direct app-open shortcuts (single-shot, no follow-up UI interaction)
     // -----------------------------------------------------------------
 
-    private fun handleDirectOpenCommand(command: String, parsed: ParsedCommand): Boolean {
-        if (parsed.intent == "open_chat") return false
+    private fun handleNativeCapability(command: String, parsed: ParsedCommand): Boolean {
+        val lower = command.lowercase(Locale.getDefault()).trim()
 
-        val lower = command.lowercase().trim()
-        if (!lower.contains("open")) return false
+        // Native shortcuts are for standalone commands only. Compound commands
+        // must reach the planner so actions after the first one are not skipped.
+        if (looksCompound(lower)) return false
 
-        val matchedApp = knownApps.entries
-            .sortedByDescending { it.key.length }
-            .firstOrNull { (name, _) -> lower.contains(name) }
-
-        if (matchedApp != null) {
-            return openApp(matchedApp.value)
-        }
-
-        if (lower.contains("settings")) {
-            return openSettings()
-        }
-
-        // Not in our hardcoded map - try resolving by installed app label
-        // instead of falling straight to the vision loop.
-        val appName = lower.removePrefix("open").trim()
-        if (appName.isNotBlank()) {
-            val resolvedPackage = findPackageByAppName(appName)
-            if (resolvedPackage != null) {
-                Log.d(TAG, "Resolved '$appName' to package $resolvedPackage via installed apps")
-                return openApp(resolvedPackage)
+        if (Regex("\\bset (a )?timer\\b|\\btimer\\b").containsMatchIn(lower)) {
+            val minutes = Regex("(\\d+)\\s*(minutes?|mins?)").find(lower)?.groupValues?.get(1)?.toLongOrNull()
+            val seconds = Regex("(\\d+)\\s*(seconds?|secs?)").find(lower)?.groupValues?.get(1)?.toLongOrNull()
+            val duration = when {
+                seconds != null -> seconds
+                minutes != null -> minutes * 60L
+                else -> null
+            }
+            if (duration != null && duration > 0) {
+                return try {
+                    val intent = Intent(AlarmClock.ACTION_SET_TIMER).apply {
+                        putExtra(AlarmClock.EXTRA_LENGTH, duration.toInt())
+                        putExtra(AlarmClock.EXTRA_SKIP_UI, false)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(intent)
+                    setOverlayStatus("Setting timer...")
+                    true
+                } catch (e: Exception) {
+                    Log.e(TAG, "Set timer failed", e)
+                    false
+                }
             }
         }
 
-        // Still not found - fall through to the vision loop.
+        if (lower.contains("take a picture") || lower.contains("take a photo") ||
+            lower.contains("capture a picture") || lower == "take picture" || lower == "take photo") {
+            return try {
+                val intent = Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(intent)
+                setOverlayStatus("Opening camera...")
+                mainHandler.postDelayed({
+                    val elements = collectScreenElements()
+                    val shutter = elements.firstOrNull {
+                        val t = (it.text ?: "").lowercase()
+                        val d = (it.contentDescription ?: "").lowercase()
+                        it.clickable && (d.contains("shutter") || d.contains("take photo") ||
+                                d.contains("take picture") || d.contains("capture") ||
+                                t == "take photo" || t == "take picture")
+                    }
+                    if (shutter != null) {
+                        performTap(shutter.centerX(), shutter.centerY())
+                        setOverlayStatus("Picture taken")
+                    } else {
+                        setOverlayStatus("Camera opened; capture button not found")
+                    }
+                }, APP_LAUNCH_DELAY_MS)
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Take picture failed", e)
+                false
+            }
+        }
+
+        if ((lower.contains("create") || lower.contains("add") || lower.contains("schedule")) &&
+            (lower.contains("calendar") || lower.contains("event"))) {
+            return try {
+                val calledIndex = lower.indexOf("called ")
+                val namedIndex = lower.indexOf("named ")
+
+                val title = when {
+                    calledIndex >= 0 -> command.substring(calledIndex + "called ".length).trim()
+                    namedIndex >= 0 -> command.substring(namedIndex + "named ".length).trim()
+                    else -> "Ghost Machine Event"
+                }.ifBlank { "Ghost Machine Event" }
+
+                val intent = Intent(Intent.ACTION_INSERT).apply {
+                    data = CalendarContract.Events.CONTENT_URI
+                    putExtra(CalendarContract.Events.TITLE, title)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    findPackageByAppName("Google Calendar")?.let { setPackage(it) }
+                }
+                startActivity(intent)
+                setOverlayStatus("Opening calendar event")
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "Calendar event failed", e)
+                false
+            }
+        }
+
+        return false
+    }
+
+    private fun handleDirectOpenCommand(command: String, parsed: ParsedCommand): Boolean {
+        if (parsed.intent == "open_chat") return false
+
+        val lower = command.lowercase(Locale.getDefault()).trim()
+        if (!lower.startsWith("open ")) return false
+
+        // A direct open is only valid for a standalone open command. If the
+        // command contains another operation, let the multistep planner run.
+        if (looksCompound(lower)) return false
+
+        val appName = lower.removePrefix("open ").trim()
+        if (appName.isBlank()) return false
+
+        if (appName == "settings" || appName == "system settings") {
+            return openSettings()
+        }
+
+        val packageName = findPackageByAppName(appName)
+        if (packageName != null) {
+            if (currentForegroundPackage() == packageName) {
+                setOverlayStatus("App is already open")
+                return true
+            }
+            return openApp(packageName)
+        }
+
         return false
     }
 
@@ -472,7 +646,7 @@ class GhostAccessibilityService : AccessibilityService() {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             startActivity(intent)
-            setOverlayStatus("Opened settings")
+            setOverlayStatus("Opening settings")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Open settings failed", e)
@@ -482,14 +656,29 @@ class GhostAccessibilityService : AccessibilityService() {
 
     private fun openApp(packageName: String): Boolean {
         return try {
+            if (currentForegroundPackage() == packageName) {
+                setOverlayStatus("App is already open")
+                return true
+            }
+
             val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
             if (launchIntent == null) {
-                setOverlayStatus("App not found")
+                setOverlayStatus("App cannot be opened")
                 return false
             }
+
             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(launchIntent)
-            setOverlayStatus("Opened app")
+            setOverlayStatus("Opening app...")
+
+            mainHandler.postDelayed({
+                if (currentForegroundPackage() == packageName) {
+                    setOverlayStatus("Opened app")
+                } else {
+                    setOverlayStatus("App did not open")
+                }
+            }, APP_LAUNCH_DELAY_MS)
+
             true
         } catch (e: Exception) {
             Log.e(TAG, "Open app failed: $packageName", e)
@@ -498,34 +687,224 @@ class GhostAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ADD IT HERE
     private fun findPackageByAppName(appName: String): String? {
-        val pm = packageManager
-        val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-        return apps.firstOrNull { app ->
-            val label = pm.getApplicationLabel(app).toString().lowercase()
-            label.contains(appName.lowercase())
-        }?.packageName
+        val wanted = normalizeAppName(appName)
+        if (wanted.isBlank()) return null
+
+        val launcherIntent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+
+        val launchablePackages = packageManager.queryIntentActivities(launcherIntent, 0)
+            .map { it.activityInfo.packageName }
+            .toSet()
+
+        val apps = packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
+            .filter { it.packageName != packageName }
+
+        val candidates = apps.mapNotNull { app ->
+            val label = packageManager.getApplicationLabel(app).toString()
+            val normalizedLabel = normalizeAppName(label)
+            if (normalizedLabel.isBlank()) return@mapNotNull null
+
+            val launchable = app.packageName in launchablePackages ||
+                    packageManager.getLaunchIntentForPackage(app.packageName) != null
+            if (!launchable) return@mapNotNull null
+
+            val score = when {
+                normalizedLabel == wanted -> 100
+                normalizedLabel.startsWith("$wanted ") -> 90
+                normalizedLabel.contains(wanted) -> 80
+                wanted.contains(normalizedLabel) -> 75
+                else -> 0
+            }
+
+            if (score == 0) null else Pair(app.packageName, score)
+        }
+
+        return candidates.maxByOrNull { it.second }?.first
+    }
+
+    private fun normalizeAppName(value: String): String {
+        return value.lowercase(Locale.getDefault())
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 
     private fun currentForegroundPackage(): String? = rootInActiveWindow?.packageName?.toString()
-
-
 
     private fun ensureAppOpen(packageName: String): Boolean {
         if (currentForegroundPackage() == packageName) return true
         return openApp(packageName)
     }
 
-    private fun resolveChatAppPackage(command: String): String {
-        val lower = command.lowercase()
-        return when {
-            lower.contains("facebook") -> "com.facebook.katana"
-            lower.contains("instagram") -> "com.instagram.android"
-            lower.contains("telegram") -> "org.telegram.messenger"
-            lower.contains("whatsapp") -> knownApps["whatsapp"] ?: "com.whatsapp"
-            else -> knownApps["whatsapp"] ?: "com.whatsapp"  // default
+    private fun resolveChatAppPackage(): String {
+        return findPackageByAppName("WhatsApp") ?: "com.whatsapp"
+    }
+
+    private fun resolveCallAppPackage(): String {
+        val dialIntent = Intent(Intent.ACTION_DIAL)
+        val resolved = packageManager.resolveActivity(dialIntent, PackageManager.MATCH_DEFAULT_ONLY)
+        return resolved?.activityInfo?.packageName ?: findPackageByAppName("Phone").orEmpty()
+    }
+
+    private fun openSystemDialer(): Boolean {
+        return try {
+            val intent = Intent(Intent.ACTION_DIAL).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+            setOverlayStatus("Opening phone")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Open system dialer failed", e)
+            false
         }
+    }
+
+    private fun isSearchElement(element: UiElement): Boolean {
+        val t = (element.text ?: "").lowercase()
+        val d = (element.contentDescription ?: "").lowercase()
+        return t.contains("search") ||
+                d.contains("search") ||
+                d.contains("search or type") ||
+                d.contains("find")
+    }
+
+    private fun isAppDrawerSearch(element: UiElement): Boolean {
+        val t = (element.text ?: "").lowercase()
+        val d = (element.contentDescription ?: "").lowercase()
+        return d.contains("apps") || d.contains("play store") ||
+                d.contains("games") || t.contains("apps & games")
+    }
+
+    private fun findSearchElement(elements: List<UiElement>): UiElement? {
+        val explicit = elements.firstOrNull {
+            !isAppDrawerSearch(it) && isSearchElement(it) && (it.editable || it.clickable)
+        }
+        if (explicit != null) return explicit
+
+        val pkg = currentForegroundPackage().orEmpty()
+        val knownSearchApp = pkg in setOf(
+            "com.android.chrome",
+            "com.google.android.youtube",
+            "com.google.android.googlequicksearchbox",
+            "com.google.android.apps.messaging",
+            "com.whatsapp"
+        )
+        return if (knownSearchApp) {
+            elements.firstOrNull {
+                it.editable && !isAppDrawerSearch(it) && isLikelySearchInput(it)
+            }
+        } else {
+            null
+        }
+    }
+
+    private fun isLikelySearchInput(element: UiElement): Boolean {
+        val t = (element.text ?: "").lowercase()
+        val d = (element.contentDescription ?: "").lowercase()
+        return t.isBlank() || t.contains("search") || d.contains("search") ||
+                d.contains("type to search") || d.contains("search or type")
+    }
+
+    private fun hasUsableSearchField(elements: List<UiElement>): Boolean {
+        return findSearchElement(elements) != null
+    }
+
+    private fun findCallButton(elements: List<UiElement>): UiElement? {
+        return elements.firstOrNull {
+            val t = (it.text ?: "").lowercase()
+            val d = (it.contentDescription ?: "").lowercase()
+            it.clickable && (
+                    d == "call" || d.contains("call mobile") ||
+                            d.contains("voice call") || d.contains("audio call") ||
+                            d.contains("call") || t == "call"
+                    ) && !d.contains("video")
+        }
+    }
+
+    private fun findSendButton(elements: List<UiElement>): UiElement? {
+        return elements.firstOrNull {
+            val t = (it.text ?: "").trim().lowercase()
+            val d = (it.contentDescription ?: "").trim().lowercase()
+            it.clickable && (
+                    d == "send" || t == "send" ||
+                            (d.contains("send") && !d.contains("money") && !d.contains("voice"))
+                    )
+        }
+    }
+
+    private fun normalizeName(value: String): String {
+        return value.lowercase()
+            .replace(Regex("[^a-z0-9 ]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun levenshtein(a: String, b: String): Int {
+        if (a == b) return 0
+        if (a.isEmpty()) return b.length
+        if (b.isEmpty()) return a.length
+        var prev = IntArray(b.length + 1) { it }
+        var curr = IntArray(b.length + 1)
+        for (i in 1..a.length) {
+            curr[0] = i
+            for (j in 1..b.length) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                curr[j] = minOf(
+                    curr[j - 1] + 1,
+                    prev[j] + 1,
+                    prev[j - 1] + cost
+                )
+            }
+            val tmp = prev
+            prev = curr
+            curr = tmp
+        }
+        return prev[b.length]
+    }
+
+    private fun nameMatches(element: UiElement, target: String): Boolean {
+        val wanted = normalizeName(target)
+        if (wanted.isBlank()) return false
+
+        val candidates = listOfNotNull(element.text, element.contentDescription)
+            .map { normalizeName(it) }
+            .filter { it.isNotBlank() }
+
+        if (candidates.any { it == wanted || it.contains(wanted) || wanted.contains(it) }) return true
+
+        val wantedParts = wanted.split(" ").filter { it.length >= 3 }
+        if (wantedParts.isEmpty()) return false
+
+        return candidates.any { candidate ->
+            val parts = candidate.split(" ").filter { it.length >= 3 }
+            wantedParts.any { w ->
+                parts.any { c ->
+                    val maxDistance = if (w.length <= 5) 1 else 2
+                    levenshtein(w, c) <= maxDistance
+                }
+            }
+        }
+    }
+
+    private fun currentScreenCanCall(elements: List<UiElement>): Boolean {
+        return findCallButton(elements) != null
+    }
+
+    private fun currentScreenIsTargetChat(elements: List<UiElement>, target: String): Boolean {
+        if (!elements.any { it.editable }) return false
+        if (target.isBlank()) {
+            return currentForegroundPackage() != null
+        }
+        return elements.any { nameMatches(it, target) && !isAvatarLike(it) }
+    }
+
+    private fun isAvatarLike(element: UiElement): Boolean {
+        val d = (element.contentDescription ?: "").lowercase()
+        return d.contains("picture") || d.contains("photo") || d.contains("avatar")
     }
 
     private fun performImeEnter(): Boolean {
@@ -540,21 +919,19 @@ class GhostAccessibilityService : AccessibilityService() {
             if (imeSuccess) return true
         }
 
-        // Fallback: some apps don't support IME_ENTER, and their submit
-        // button might not literally say "search" - broaden what we accept.
         val elements = collectScreenElements()
-        val searchButton = elements.firstOrNull {
-            val d = (it.contentDescription ?: "").lowercase()
-            it.clickable && (
-                    d.contains("search") || d.contains("go") ||
-                            d.contains("submit") || d.contains("enter") ||
-                            d.contains("find") || d == "" && it.clickable // icon-only buttons often have empty description
+        val explicitButton = elements.firstOrNull {
+            val t = (it.text ?: "").trim().lowercase()
+            val d = (it.contentDescription ?: "").trim().lowercase()
+            it.clickable && !isSensitiveElement(it) && (
+                    t in setOf("search", "go", "submit", "find", "done") ||
+                            d in setOf("search", "go", "submit", "find", "done")
                     )
         }
 
-        return if (searchButton != null) {
-            Log.d(TAG, "IME_ENTER unsupported, tapping search button instead")
-            performTap(searchButton.centerX(), searchButton.centerY())
+        return if (explicitButton != null) {
+            Log.d(TAG, "IME_ENTER unsupported, tapping explicit submit button")
+            performTap(explicitButton.centerX(), explicitButton.centerY())
         } else {
             false
         }
@@ -562,33 +939,21 @@ class GhostAccessibilityService : AccessibilityService() {
 
     private fun runMultiStepCommand(steps: List<ApiClient.PlannedStep>, replyLanguage: String) {
         for ((index, step) in steps.withIndex()) {
-            val parsed = ParsedCommand(voiceContext.parsedIntent, voiceContext.parsedTarget)
+            val parsed = ParsedCommand(step.intent, step.target)
+            val isLast = index == steps.lastIndex
 
-            if (!looksCompound(voiceContext.normalizedCommand) && handleDirectOpenCommand(voiceContext.normalizedCommand, parsed)) {
-                mainHandler.postDelayed({
-                    showButtonAgain()
-                    isRunning.set(false)
-                }, 900)
-                return
-            }
+            Log.d(TAG, "Multi-step ${index + 1}/${steps.size}: ${step.intent} -> ${step.target}")
+            mainHandler.post { setOverlayStatus("Step ${index + 1}/${steps.size}: ${step.intent}") }
 
-            Thread {
-                try {
-                    if (looksCompound(voiceContext.normalizedCommand)) {
-                        when (val plan = ApiClient.planCommand(voiceContext.normalizedCommand, currentReplyLanguage)) {
-                            is ApiClient.PlanResult.Success -> runMultiStepCommand(plan.steps, currentReplyLanguage)
-                            is ApiClient.PlanResult.Failure -> runVisionLoop(voiceContext.normalizedCommand, parsed, currentReplyLanguage)
-                        }
-                    } else {
-                        runVisionLoop(voiceContext.normalizedCommand, parsed, currentReplyLanguage)
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Vision loop crashed", e)
-                    speakAndFinish("error", currentReplyLanguage)
-                } finally {
-                    isRunning.set(false)
+            val result = runVisionLoop(step.target, parsed, replyLanguage, speakOnSuccess = isLast)
+
+            when (result) {
+                is StepResult.Done -> continue
+                is StepResult.NeedsHelp, is StepResult.Error -> {
+                    Log.d(TAG, "Multi-step chain stopped at step ${index + 1}")
+                    return
                 }
-            }.start()
+            }
         }
     }
 
@@ -607,57 +972,34 @@ class GhostAccessibilityService : AccessibilityService() {
             return StepResult.NeedsHelp("blank target")
         }
 
-
-        if (parsed.intent == "open") {
-            val messagingApps = setOf("com.whatsapp", "com.whatsapp.w4b", "com.google.android.apps.messaging", "com.google.android.dialer")
-            val targetLower = parsed.target.lowercase()
-            val isMessagingRequest = targetLower.contains("message") || targetLower.contains("chat") || targetLower.contains("whatsapp") || targetLower.contains("sms")
-
-            val currentPkg = currentForegroundPackage()
-            val alreadyInEquivalentApp = isMessagingRequest && currentPkg in messagingApps
-
-            if (alreadyInEquivalentApp) {
-                // Already in a messaging-capable app - don't switch, just continue
-                // the chain from here.
-                Log.d(TAG, "Already in a messaging app ($currentPkg), skipping open step")
-                if (speakOnSuccess) speakAndFinish("done", replyLanguage) else mainHandler.post { setOverlayStatus("Step done") }
-                return StepResult.Done
-            }
-
-            val resolvedPackage = knownApps.entries
-                .firstOrNull { (name, _) -> targetLower.contains(name) }?.value
-                ?: findPackageByAppName(parsed.target)
-
-            if (resolvedPackage != null) {
-                if (currentPkg != resolvedPackage) {
-                    mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
-                    val launched = ensureAppOpen(resolvedPackage)
-                    if (!launched) { speakAndFinish("error", replyLanguage); return StepResult.Error }
-                    Thread.sleep(APP_LAUNCH_DELAY_MS)
-                }
-                if (speakOnSuccess) speakAndFinish("done", replyLanguage) else mainHandler.post { setOverlayStatus("Step done") }
-                return StepResult.Done
-            }
-        }
-
-
         if (parsed.intent == "call") {
-            val targetPackage = resolveCallAppPackage()
             val currentElements = collectScreenElements()
-            val alreadyAchievable = isGoalAchieved(parsed, currentElements, null, false) ||
-                    currentForegroundPackage() == targetPackage
+            val currentPkg = currentForegroundPackage()
+            val currentCanCall = currentScreenCanCall(currentElements)
+            val targetVisible = parsed.target.isNotBlank() &&
+                    currentElements.any { nameMatches(it, parsed.target) && !isAvatarLike(it) }
+            val currentAppCanContinue = currentPkg == resolveChatAppPackage() ||
+                    currentPkg == resolveCallAppPackage()
 
-            if (!alreadyAchievable) {
+            // First rule: a callable control already on screen always wins.
+            // If not, only stay in a known calling/messaging app when the
+            // requested person is visible there. Otherwise open Phone.
+            if (!currentCanCall && !(currentAppCanContinue && targetVisible)) {
                 mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
-                val launched = ensureAppOpen(targetPackage)
-                if (!launched) { speakAndFinish("error", replyLanguage); return StepResult.Error }
+                val launched = openSystemDialer()
+                if (!launched) {
+                    val callPackage = resolveCallAppPackage()
+                    if (callPackage.isBlank() || !ensureAppOpen(callPackage)) {
+                        speakAndFinish("error", replyLanguage)
+                        return StepResult.Error
+                    }
+                }
                 Thread.sleep(APP_LAUNCH_DELAY_MS)
             }
         }
 
         if (parsed.intent == "open") {
-            val resolvedPackage = knownApps.entries.firstOrNull { (name, _) -> parsed.target.lowercase().contains(name) }?.value
-                ?: findPackageByAppName(parsed.target)
+            val resolvedPackage = findPackageByAppName(parsed.target)
 
             if (resolvedPackage != null && currentForegroundPackage() != resolvedPackage) {
                 mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
@@ -670,8 +1012,7 @@ class GhostAccessibilityService : AccessibilityService() {
         if (parsed.intent == "open_chat") {
             val targetPackage = resolveChatAppPackage()
             val currentElements = collectScreenElements()
-            val alreadyAchievable = isGoalAchieved(parsed, currentElements, null, false) ||
-                    currentForegroundPackage() == targetPackage
+            val alreadyAchievable = isGoalAchieved(parsed, currentElements, null, false)
 
             if (!alreadyAchievable) {
                 mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
@@ -689,19 +1030,32 @@ class GhostAccessibilityService : AccessibilityService() {
         // of forcing Google - decideWithAndroidOnly's "search" branch looks at
         // whatever screen is currently in front of it.
         if (parsed.intent == "search") {
-            val foregroundPkg = currentForegroundPackage()
-            val isOnHomeScreen = foregroundPkg == null || foregroundPkg.contains("launcher") || foregroundPkg.contains("home")
+            val currentElements = collectScreenElements()
+            Log.d(TAG, "Search precondition package=${currentForegroundPackage()} elements=${currentElements.size}")
 
-            if (isOnHomeScreen) {
-                // always launch Google from home screen - never trust a home-screen search widget
+            // Search the app that is already on screen when it exposes a real
+            // search field. Do not confuse a chat/message EditText with search.
+            if (!hasUsableSearchField(currentElements)) {
                 mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
-                val launched = ensureAppOpen("com.google.android.googlequicksearchbox")
+                val launched = ensureAppOpen(findPackageByAppName("Google") ?: "com.google.android.googlequicksearchbox")
                 if (!launched) { speakAndFinish("error", replyLanguage); return StepResult.Error }
                 Thread.sleep(APP_LAUNCH_DELAY_MS)
-            } else {
-                val currentElements = collectScreenElements()
-                val hasSearchableField = currentElements.any { /* existing exclusion logic */ }
-                if (!hasSearchableField) { /* existing launch-google fallback */ }
+            }
+        }
+
+        if (parsed.intent == "open_chat") {
+            val currentElements = collectScreenElements()
+            val currentPkg = currentForegroundPackage()
+
+            if (currentScreenIsTargetChat(currentElements, parsed.target)) {
+                Log.d(TAG, "Target chat already open; staying in current app")
+            } else if (currentPkg != resolveChatAppPackage()) {
+                mainHandler.post { setOverlayStatus(VoiceLanguageManager.message("checking", replyLanguage)) }
+                if (!ensureAppOpen(resolveChatAppPackage())) {
+                    speakAndFinish("error", replyLanguage)
+                    return StepResult.Error
+                }
+                Thread.sleep(APP_LAUNCH_DELAY_MS)
             }
         }
 
@@ -709,6 +1063,7 @@ class GhostAccessibilityService : AccessibilityService() {
         var previousSignature: String? = null
         var repeatedFailCount = 0
         var lastAttemptedTarget: String? = null
+        var vlmAskUserRetries = 0
 
         for (step in 1..MAX_STEPS) {
             Log.d(TAG, "===== STEP $step =====")
@@ -732,25 +1087,45 @@ class GhostAccessibilityService : AccessibilityService() {
 
             val currentTargetKey = "${parsed.intent}:${parsed.target}"
             if (previousAction != null && !screenChanged && lastAttemptedTarget == currentTargetKey) {
+                // Side-effect verification gets a little more time. Never turn
+                // an already-dispatched send/call into another send/call.
+                if (sideEffectDispatched && parsed.intent in setOf("type_and_send", "call")) {
+                    Thread.sleep(900)
+                }
                 repeatedFailCount++
             } else {
                 repeatedFailCount = 0
             }
             lastAttemptedTarget = currentTargetKey
 
-            if (repeatedFailCount >= 2) {
+            if (repeatedFailCount >= 3) {
+                if (sideEffectDispatched && parsed.intent in setOf("type_and_send", "call")) {
+                    val msg = if (parsed.intent == "type_and_send") {
+                        "I sent it, but I couldn't verify the result on screen."
+                    } else {
+                        "I started the call, but I couldn't verify the call state."
+                    }
+                    showOverlayWithStatus(msg)
+                    ghostTts?.speak(msg, replyLanguage)
+                    showButtonAgain()
+                    return StepResult.NeedsHelp(msg)
+                }
                 Log.d(TAG, "Same action attempted repeatedly with no screen change - escalating to ask_user")
-                speakAndFinish("need_help", replyLanguage, overrideStatus = "I tried a couple of times but nothing changed - can you help me out?")
+                speakAndFinish("need_help", replyLanguage, overrideStatus = "I couldn't complete that from the current screen.")
                 return StepResult.NeedsHelp("stalled")
             }
 
             val lastActionHadNoEffect = previousAction != null &&
                     previousAction.type in setOf(
-                ActionType.TAP, ActionType.TAP_THEN_TYPE, ActionType.TYPE   // removed SWIPE
+                ActionType.TAP, ActionType.TAP_THEN_TYPE, ActionType.SWIPE, ActionType.TYPE
             ) && !screenChanged
 
             val decision: Action? =
-                if (!lastActionHadNoEffect) decideWithAndroidOnly(parsed, elements) else null
+                if (sideEffectDispatched && parsed.intent in setOf("type_and_send", "call")) {
+                    Action(ActionType.WAIT, reason = "side effect dispatched; verify without repeating", confidence = 1.0)
+                } else if (!lastActionHadNoEffect) {
+                    decideWithAndroidOnly(parsed, elements)
+                } else null
 
             Log.d(TAG, "Android decision: ${decision?.type} conf=${decision?.confidence} reason=${decision?.reason ?: "skipped (last action had no effect)"}")
 
@@ -760,9 +1135,12 @@ class GhostAccessibilityService : AccessibilityService() {
 
                 if (executed) {
                     if (parsed.intent == "type_and_send" && decision.type == ActionType.TAP) {
-                        Log.d(TAG, "type_and_send: message sent, finishing")
-                        if (speakOnSuccess) speakAndFinish("done", replyLanguage)
-                        return StepResult.Done
+                        sideEffectKey = "send:${currentForegroundPackage()}:${normalizeName(parsed.target)}"
+                        sideEffectDispatched = true
+                    }
+                    if (parsed.intent == "call" && decision.type == ActionType.TAP && decision.reason.contains("call", ignoreCase = true)) {
+                        sideEffectKey = "call:${currentForegroundPackage()}:${normalizeName(parsed.target)}"
+                        sideEffectDispatched = true
                     }
                     previousAction = decision
                     previousSignature = signature
@@ -784,12 +1162,17 @@ class GhostAccessibilityService : AccessibilityService() {
             }
 
             val result = ApiClient.analyzeScreen(
+                context = this@GhostAccessibilityService,
                 command = command,
                 screenshotBytes = screenshotBytes,
                 screenElementsJson = elementsToJson(elements, parsed),
                 parsedIntent = parsed.intent,
                 parsedTarget = parsed.target,
-                androidUncertainty = decision?.reason ?: "no confident android decision",
+                androidUncertainty = if (vlmAskUserRetries > 0) {
+                    "Previous VLM answer asked for help without acting. Re-check the current screen and choose one concrete safe action if possible."
+                } else {
+                    decision?.reason ?: "no confident android decision"
+                },
                 previousAction = previousAction?.type?.name?.lowercase(),
                 replyLanguage = replyLanguage
             )
@@ -813,6 +1196,37 @@ class GhostAccessibilityService : AccessibilityService() {
                     }
 
                     if (vlmAction.type == ActionType.ASK_USER) {
+                        // Do not stop on the first VLM "ask_user". Re-check the
+                        // current screen with the deterministic Android rules first.
+                        val recovery = decideWithAndroidOnly(parsed, elements)
+                        if (recovery.type !in setOf(ActionType.NONE, ActionType.ASK_USER, ActionType.DONE) &&
+                            recovery.confidence >= CONFIDENCE_FLOOR &&
+                            !(sideEffectDispatched && parsed.intent in setOf("type_and_send", "call"))) {
+                            val recovered = executeAction(
+                                recovery,
+                                elements,
+                                pressEnter = parsed.intent == "search"
+                            )
+                            if (recovered) {
+                                previousAction = recovery
+                                previousSignature = signature
+                                vlmAskUserRetries = 0
+                                Thread.sleep(STEP_DELAY_MS)
+                                continue
+                            }
+                        }
+
+                        // A VLM can ask for help because it was uncertain for one
+                        // transient response. Give it two re-observe/reason chances
+                        // before surfacing the request to the user.
+                        if (vlmAskUserRetries < 2) {
+                            vlmAskUserRetries++
+                            previousAction = null
+                            previousSignature = signature
+                            Thread.sleep(600)
+                            continue
+                        }
+
                         val msg = vlmAction.userMessage
                             ?: VoiceLanguageManager.message("need_help", replyLanguage, vlmAction.reason)
                         showOverlayWithStatus(msg)
@@ -822,8 +1236,13 @@ class GhostAccessibilityService : AccessibilityService() {
                     }
 
                     if (vlmAction.type == ActionType.DONE) {
-                        if (speakOnSuccess) speakAndFinish("done", replyLanguage)
-                        return StepResult.Done
+                        val verified = isGoalAchieved(parsed, elements, previousAction, false)
+                        if (verified) {
+                            if (speakOnSuccess) speakAndFinish("done", replyLanguage)
+                            return StepResult.Done
+                        }
+                        Log.w(TAG, "VLM reported DONE but Android verification failed")
+                        break
                     }
 
                     val executed = executeAction(vlmAction, elements, pressEnter = parsed.intent == "search")
@@ -835,14 +1254,22 @@ class GhostAccessibilityService : AccessibilityService() {
                     }
 
                     if (parsed.intent == "type_and_send" && vlmAction.type == ActionType.TAP) {
-                        Log.d(TAG, "type_and_send: message sent (vlm), finishing")
-                        if (speakOnSuccess) speakAndFinish("done", replyLanguage)
-                        return StepResult.Done
+                        sideEffectKey = "send:${currentForegroundPackage()}:${normalizeName(parsed.target)}"
+                        sideEffectDispatched = true
+                    }
+                    if (parsed.intent == "call" && vlmAction.type == ActionType.TAP && vlmAction.reason.contains("call", ignoreCase = true)) {
+                        sideEffectKey = "call:${currentForegroundPackage()}:${normalizeName(parsed.target)}"
+                        sideEffectDispatched = true
                     }
 
                     previousAction = vlmAction
                     previousSignature = signature
                     Thread.sleep(STEP_DELAY_MS)
+                }
+
+                else -> {
+                    Log.e(TAG, "Unknown AnalyzeResult returned")
+                    break
                 }
             }
         }
@@ -857,152 +1284,112 @@ class GhostAccessibilityService : AccessibilityService() {
 
     private fun decideWithAndroidOnly(parsed: ParsedCommand, elements: List<UiElement>): Action {
         val intent = parsed.intent
-        val target = parsed.target.lowercase().trim()
+        val target = parsed.target.trim()
 
         return when (intent) {
             "back" -> Action(ActionType.BACK, reason = "direct back", confidence = 1.0)
             "home" -> Action(ActionType.HOME, reason = "direct home", confidence = 1.0)
-            "scroll" -> Action(ActionType.SWIPE, direction = parsed.target, reason = "direct scroll", confidence = 1.0)
+            "scroll" -> Action(ActionType.SWIPE, direction = target, reason = "direct scroll", confidence = 1.0)
 
             "type" -> {
                 val editable = elements.firstOrNull { it.editable }
                 if (editable != null || isAnyInputFocused()) {
                     Action(ActionType.TYPE, element = editable, text = parsed.target, reason = "input ready", confidence = 0.95)
-                } else {
-                    Action(ActionType.NONE, reason = "no editable field found for type", confidence = 0.3)
-                }
+                } else Action(ActionType.NONE, reason = "no editable field found for type", confidence = 0.3)
             }
 
             "search" -> {
-                // Search whatever screen is currently in front - but explicitly
-                // exclude app-drawer / Play Store style search fields, since those
-                // search installed apps, not the web, and would silently hijack a
-                // real web search if left on screen from an earlier command.
-                val searchMatches = elements.filter {
-                    val t = (it.text ?: "").lowercase()
-                    val d = (it.contentDescription ?: "").lowercase()
-                    val isAppSearch = d.contains("apps") || d.contains("play store") ||
-                            d.contains("games") || t.contains("apps & games")
-
-                    !isAppSearch && (it.editable || t.contains("search") || d.contains("search"))
-                }
-                val editableSearch = searchMatches.firstOrNull { it.editable }
-
-                when {
-                    editableSearch != null -> Action(
-                        ActionType.TAP_THEN_TYPE, element = editableSearch, text = parsed.target,
-                        reason = "search field found", confidence = 0.95
+                val search = findSearchElement(elements)
+                if (search != null) {
+                    Action(
+                        ActionType.TAP_THEN_TYPE,
+                        element = search,
+                        text = parsed.target,
+                        reason = "search field found in current app",
+                        confidence = 0.95
                     )
-                    searchMatches.size == 1 -> Action(
-                        ActionType.TAP_THEN_TYPE, element = searchMatches.first(), text = parsed.target,
-                        reason = "search element found", confidence = 0.85
-                    )
-                    else -> Action(ActionType.NONE, reason = "no valid web search field on current screen", confidence = 0.3)
-                }
+                } else Action(ActionType.NONE, reason = "no usable search field on current screen", confidence = 0.3)
             }
 
             "send" -> {
-                val sendButton = elements.firstOrNull {
-                    val d = (it.contentDescription ?: "").lowercase()
-                    it.clickable && d == "send"
-                } ?: elements.firstOrNull {
-                    val d = (it.contentDescription ?: "").lowercase()
-                    it.clickable && d.contains("send") && !d.contains("voice") && !d.contains("money")
-                }
-
-                if (sendButton != null) {
-                    Action(ActionType.TAP, element = sendButton, reason = "send button found", confidence = 0.9)
-                } else {
-                    Action(ActionType.NONE, reason = "send button not found", confidence = 0.3)
-                }
+                val send = findSendButton(elements)
+                if (send != null) Action(ActionType.TAP, element = send, reason = "send button found", confidence = 0.95)
+                else Action(ActionType.NONE, reason = "send button not found", confidence = 0.3)
             }
 
             "type_and_send" -> {
                 val editable = elements.firstOrNull { it.editable }
-                val alreadyTyped = editable != null && (editable.text ?: "").lowercase().contains(target)
+                val currentText = editable?.text?.toString()?.trim().orEmpty()
 
-                if (!alreadyTyped) {
+                if (currentText != parsed.target) {
                     if (editable != null || isAnyInputFocused()) {
-                        Action(ActionType.TYPE, element = editable, text = parsed.target, reason = "input ready", confidence = 0.95)
+                        Action(ActionType.TYPE, element = editable, text = parsed.target, reason = "message input ready", confidence = 0.95)
                     } else {
-                        Action(ActionType.NONE, reason = "no editable field found", confidence = 0.3)
+                        Action(ActionType.NONE, reason = "no message input found", confidence = 0.3)
                     }
                 } else {
-                    val sendButton = elements.firstOrNull {
-                        val d = (it.contentDescription ?: "").lowercase()
-                        val t = (it.text ?: "").lowercase()
-                        it.clickable && (d.contains("send") || t.contains("send"))
-                    }
-                    if (sendButton != null) {
-                        Action(ActionType.TAP, element = sendButton, reason = "send button found", confidence = 0.9)
-                    } else {
-                        Action(ActionType.NONE, reason = "send button not found", confidence = 0.3)
-                    }
+                    val send = findSendButton(elements)
+                    if (send != null) {
+                        val key = "send:${currentForegroundPackage()}:${normalizeName(parsed.target)}"
+                        if (sideEffectKey == key && sideEffectDispatched) {
+                            Action(ActionType.WAIT, reason = "send already dispatched; waiting for verification", confidence = 1.0)
+                        } else {
+                            Action(ActionType.TAP, element = send, reason = "explicit send button found", confidence = 0.95)
+                        }
+                    } else Action(ActionType.NONE, reason = "send button not found", confidence = 0.3)
                 }
             }
 
             "tap" -> {
                 val matches = elements.filter {
-                    val t = (it.text ?: "").lowercase()
-                    val d = (it.contentDescription ?: "").lowercase()
-                    target.isNotBlank() && (t.contains(target) || d.contains(target))
+                    target.isNotBlank() && nameMatches(it, target) && !isAvatarLike(it)
                 }
-                if (matches.size == 1) {
-                    Action(ActionType.TAP, element = matches.first(), reason = "single match for '$target'", confidence = 0.9)
+                if (matches.size == 1) Action(ActionType.TAP, element = matches.first(), reason = "single target match", confidence = 0.9)
+                else Action(ActionType.NONE, reason = "target '$target' unclear (${matches.size} matches)", confidence = 0.35)
+            }
+
+            "open_chat" -> {
+                if (target.isBlank() && currentForegroundPackage() == resolveChatAppPackage()) {
+                    Action(ActionType.DONE, reason = "messaging app already open", confidence = 1.0)
+                } else if (currentScreenIsTargetChat(elements, target)) {
+                    Action(ActionType.DONE, reason = "target chat already open", confidence = 1.0)
                 } else {
-                    Action(ActionType.NONE, reason = "target '$target' unclear (${matches.size} matches)", confidence = 0.35)
+                    val exact = elements.filter { nameMatches(it, target) && !isAvatarLike(it) }
+                    when {
+                        exact.size == 1 -> Action(ActionType.TAP, element = exact.first(), reason = "contact match on current screen", confidence = 0.9)
+                        exact.size > 1 -> Action(ActionType.NONE, reason = "more than one possible contact match", confidence = 0.3)
+                        else -> {
+                            val search = findSearchElement(elements)
+                            val searchIcon = elements.firstOrNull {
+                                it.clickable && isSearchElement(it) && !isAppDrawerSearch(it)
+                            }
+                            when {
+                                search != null -> Action(ActionType.TAP_THEN_TYPE, element = search, text = target, reason = "using current app search", confidence = 0.9)
+                                searchIcon != null -> Action(ActionType.TAP, element = searchIcon, reason = "opening current app search", confidence = 0.85)
+                                else -> Action(ActionType.NONE, reason = "contact not visible and current app has no search", confidence = 0.3)
+                            }
+                        }
+                    }
                 }
             }
 
-            "open_chat", "call" -> {
-                if (intent == "call") {
-                    val callButton = elements.firstOrNull {
-                        val d = (it.contentDescription ?: "").lowercase()
-                        it.clickable && (
-                                d == "call" || d == "voice call" ||
-                                        d.contains("call mobile") ||
-                                        (d.contains("call") && !d.contains("video") && !d.contains("history") && !d.contains("log"))
-                                )
-                    }
-                    if (callButton != null) {
-                        return Action(ActionType.TAP, element = callButton, reason = "call button found on contact page", confidence = 0.9)
-                    }
-                }
-
-                val directMatches = elements.filter {
-                    // ...rest unchanged
-                    val t = (it.text ?: "").lowercase()
-                    val d = (it.contentDescription ?: "").lowercase()
-                    target.isNotBlank() && (t.contains(target) || d.contains(target)) &&
-                            !d.contains("picture") && !d.contains("photo") && !d.contains("avatar")
-                }
-
-                if (directMatches.size == 1) {
-                    Action(ActionType.TAP, element = directMatches.first(), reason = "direct match for '$target'", confidence = 0.9)
-                } else if (directMatches.isEmpty()) {
-                    // Not visible on the current screen - try the app's own search
-                    // feature instead of guessing or giving up.
-                    val searchIcon = elements.firstOrNull {
-                        val d = (it.contentDescription ?: "").lowercase()
-                        it.clickable && d.contains("search")
-                    }
-                    val editableSearch = elements.firstOrNull { it.editable }
-
-                    when {
-                        editableSearch != null -> Action(
-                            ActionType.TAP_THEN_TYPE, element = editableSearch, text = target,
-                            reason = "using in-app search for '$target'", confidence = 0.85
-                        )
-                        searchIcon != null -> Action(
-                            ActionType.TAP, element = searchIcon,
-                            reason = "opening search to find '$target'", confidence = 0.8
-                        )
-                        else -> Action(ActionType.NONE, reason = "'$target' not visible and no search found", confidence = 0.3)
+            "call" -> {
+                val callButton = findCallButton(elements)
+                if (callButton != null) {
+                    val key = "call:${currentForegroundPackage()}:${normalizeName(target)}"
+                    if (sideEffectKey == key && sideEffectDispatched) {
+                        Action(ActionType.WAIT, reason = "call already dispatched; waiting for verification", confidence = 1.0)
+                    } else {
+                        Action(ActionType.TAP, element = callButton, reason = "call control found in current app", confidence = 0.95)
                     }
                 } else {
-                    Action(ActionType.NONE, reason = "target '$target' unclear (${directMatches.size} matches)", confidence = 0.35)
+                    val matches = elements.filter { target.isNotBlank() && nameMatches(it, target) && !isAvatarLike(it) }
+                    when {
+                        matches.size == 1 -> Action(ActionType.TAP, element = matches.first(), reason = "contact found before call", confidence = 0.85)
+                        matches.size > 1 -> Action(ActionType.NONE, reason = "more than one possible call target", confidence = 0.3)
+                        else -> Action(ActionType.NONE, reason = "no callable control or target found", confidence = 0.3)
+                    }
                 }
-
             }
 
             else -> Action(ActionType.NONE, reason = "unknown command", confidence = 0.2)
@@ -1024,57 +1411,89 @@ class GhostAccessibilityService : AccessibilityService() {
         screenChanged: Boolean
     ): Boolean {
         val intent = parsed.intent
-        val target = parsed.target.lowercase().trim()
+        val target = parsed.target.trim()
 
         return when (intent) {
             "open_chat" -> {
-                if (target.isBlank()) return false
-                if (currentForegroundPackage() != resolveChatAppPackage()) return false
-
-                val hasMessageInput = elements.any { it.editable }
-                val notOnSearchScreen = elements.none {
-                    val d = (it.contentDescription ?: "").lowercase()
-                    d.contains("search") && it.editable
-                }
-
-                val hasTarget = elements.any { (it.text ?: "").lowercase().contains(target) }
-
-                hasTarget && hasMessageInput && notOnSearchScreen
+                currentScreenIsTargetChat(elements, target) ||
+                        (target.isBlank() && currentForegroundPackage() == resolveChatAppPackage())
             }
 
-            "call" -> previousAction?.type == ActionType.TAP && screenChanged
+            "call" -> {
+                // A call action is successful only after the UI changes into an
+                // active call/in-call state, not merely because a button was tapped.
+                val activeCall = elements.any {
+                    val t = (it.text ?: "").lowercase()
+                    val d = (it.contentDescription ?: "").lowercase()
+                    t.contains("end call") || t.contains("hang up") ||
+                            d.contains("end call") || d.contains("hang up") ||
+                            t.contains("mute") || d.contains("mute")
+                }
+                previousAction?.type == ActionType.TAP && screenChanged && activeCall
+            }
 
             "type_and_send" -> {
                 val editable = elements.firstOrNull { it.editable }
-                previousAction?.type == ActionType.TAP && (editable == null || (editable.text ?: "").isBlank())
+                val inputText = editable?.text?.toString()?.trim().orEmpty()
+                val messageStillInInput = inputText.isNotBlank() &&
+                        normalizeName(inputText) == normalizeName(target)
+                val outgoingVisible = elements.any {
+                    val t = it.text?.trim().orEmpty()
+                    !it.editable &&
+                            it.top > (resources.displayMetrics.heightPixels * 0.20f) &&
+                            (t == target || (target.length > 3 && normalizeName(t) == normalizeName(target)))
+                }
+                val inputCleared = editable == null || inputText.isBlank()
+
+                previousAction?.type == ActionType.TAP &&
+                        inputCleared &&
+                        !messageStillInInput &&
+                        (screenChanged || outgoingVisible)
             }
 
             "type" -> {
-                if (target.isBlank()) return false
-                elements.any { it.editable && (it.text ?: "").lowercase().contains(target) }
+                if (target.isBlank()) false
+                else elements.any { it.editable && it.text?.toString() == parsed.target }
             }
 
             "search" -> {
                 if (target.isBlank()) return false
 
-                // Success looks like either: the target text is still visibly
-                // typed into a field (search just fired), OR a search/type action
-                // already ran and the screen visibly changed (results loaded) -
-                // don't keep waiting for an editable field with the exact text,
-                // since results pages often don't have one anymore.
-                val typedInField = elements.any { it.editable && (it.text ?: "").lowercase().contains(target) }
-                val searchRanAndScreenChanged = previousAction?.type in setOf(ActionType.TAP_THEN_TYPE, ActionType.TYPE) && screenChanged
+                val nonEditableTargetVisible = elements.any {
+                    val t = (it.text ?: "").trim()
+                    val d = (it.contentDescription ?: "").lowercase()
+                    !it.editable && t.length > 2 &&
+                            (t.contains(parsed.target, ignoreCase = true) ||
+                                    d.contains("search result") || d.contains("result"))
+                }
 
-                typedInField || searchRanAndScreenChanged
+                val searchFieldStillContainsTarget = elements.any {
+                    it.editable && it.text?.toString()?.contains(parsed.target, ignoreCase = true) == true
+                }
+
+                // Typing alone is never success. A search succeeds only after
+                // the submit action changes the UI and a non-input result state
+                // is visible.
+                nonEditableTargetVisible && previousAction != null && screenChanged &&
+                        !searchFieldStillContainsTarget
             }
 
-            "send" -> previousAction?.type == ActionType.TAP
-
+            "send" -> {
+                val input = elements.firstOrNull { it.editable }
+                val sendButtonGone = findSendButton(elements) == null
+                previousAction?.type == ActionType.TAP &&
+                        sideEffectDispatched &&
+                        (input == null || input.text?.toString()?.trim().isNullOrBlank()) &&
+                        sendButtonGone
+            }
             "tap" -> previousAction?.type == ActionType.TAP && screenChanged
             "scroll" -> previousAction?.type == ActionType.SWIPE
             "back" -> previousAction?.type == ActionType.BACK
             "home" -> previousAction?.type == ActionType.HOME
-
+            "open" -> {
+                val resolved = findPackageByAppName(parsed.target)
+                resolved != null && currentForegroundPackage() == resolved
+            }
             else -> false
         }
     }
@@ -1188,6 +1607,7 @@ class GhostAccessibilityService : AccessibilityService() {
             val obj = JSONObject(responseJson)
 
             val actionStr = obj.optString("action")
+            val elementId = if (obj.isNull("element_id")) null else obj.optInt("element_id")
             val gridCell = if (obj.isNull("grid_cell")) null else obj.optString("grid_cell")
             val rawText = if (obj.isNull("text")) null else obj.optString("text")
             val direction = if (obj.isNull("direction")) null else obj.optString("direction")
@@ -1218,21 +1638,19 @@ class GhostAccessibilityService : AccessibilityService() {
                 else -> ActionType.NONE
             }
 
-            if (type in setOf(ActionType.TAP, ActionType.TYPE, ActionType.TAP_THEN_TYPE, ActionType.SWIPE) &&
-                confidence < CONFIDENCE_FLOOR
-            ) {
-                return Action(
-                    type = ActionType.ASK_USER,
-                    reason = reason,
-                    userMessage = userMessage ?: "I'm not fully sure - can you clarify?",
-                    confidence = confidence,
-                    source = "vlm"
-                )
-            }
+            // Confidence alone must not turn a concrete, resolvable action into
+            // an immediate help request. The executor still enforces safety, and
+            // tap actions must have a real element/grid/coordinate target below.
+            // Keep the model's confidence for logging/diagnostics instead of
+            // discarding an otherwise actionable result.
 
             var resolvedElement: UiElement? = null
 
-            if (type == ActionType.TAP || type == ActionType.TYPE) {
+            if (elementId != null) {
+                resolvedElement = elements.firstOrNull { it.id == elementId }
+            }
+
+            if (resolvedElement == null && (type == ActionType.TAP || type == ActionType.TYPE)) {
                 val searchTerm = listOfNotNull(targetText, rawText, reason)
                     .map { it.lowercase().trim() }
                     .firstOrNull { it.isNotBlank() && it.length > 1 }
@@ -1249,8 +1667,12 @@ class GhostAccessibilityService : AccessibilityService() {
                         matches.size == 1 -> matches.first()
                         matches.size > 1 -> matches.maxByOrNull { el ->
                             var score = 0
+                            val t = (el.text ?: "").lowercase()
+                            val d = (el.contentDescription ?: "").lowercase()
                             if (el.clickable) score += 100
-                            score += (el.right - el.left)
+                            if (t == searchTerm || d == searchTerm) score += 100
+                            if (t.contains(searchTerm) || d.contains(searchTerm)) score += 40
+                            score += max(0, el.right - el.left)
                             score
                         }
                         else -> null
@@ -1258,9 +1680,12 @@ class GhostAccessibilityService : AccessibilityService() {
                 }
             }
 
+            // Only ask the user when the model gave us no usable element id,
+            // no matching accessibility element, and no coordinate/grid fallback.
             var earlyAskUser: Action? = null
-            if (type == ActionType.TAP && resolvedElement == null && x == null && y == null) {
-                Log.d(TAG, "VLM tap: no text match and no coordinates available")
+            if (type == ActionType.TAP && resolvedElement == null &&
+                gridCell.isNullOrBlank() && (x == null || y == null)) {
+                Log.d(TAG, "VLM tap: no usable element, grid, or coordinates")
                 earlyAskUser = Action(
                     type = ActionType.ASK_USER,
                     reason = "could not resolve tap target",
